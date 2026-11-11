@@ -1,0 +1,332 @@
+#include "cpu/interpreter.h"
+#include "kernel/hle_kernel.h"
+#include "common/logging.h"
+#include <iomanip>
+#include <sstream>
+
+namespace Scarlett {
+
+static u64* GetRegisterPtr(CpuContext& ctx, u8 regIdx) {
+    switch (regIdx) {
+        case 0: return &ctx.rax;
+        case 1: return &ctx.rcx;
+        case 2: return &ctx.rdx;
+        case 3: return &ctx.rbx;
+        case 4: return &ctx.rsp;
+        case 5: return &ctx.rbp;
+        case 6: return &ctx.rsi;
+        case 7: return &ctx.rdi;
+        case 8: return &ctx.r8;
+        case 9: return &ctx.r9;
+        case 10: return &ctx.r10;
+        case 11: return &ctx.r11;
+        case 12: return &ctx.r12;
+        case 13: return &ctx.r13;
+        case 14: return &ctx.r14;
+        case 15: return &ctx.r15;
+        default: return nullptr;
+    }
+}
+
+DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
+    DecodedInstruction inst{};
+    u8 offset = 0;
+    bool rexW = false;
+    u8 rexR = 0, rexB = 0;
+
+    // Check for REX prefix (0x40 - 0x4F)
+    if ((code[offset] & 0xF0) == 0x40) {
+        u8 rex = code[offset++];
+        rexW = (rex & 0x08) != 0;
+        rexR = (rex & 0x04) ? 8 : 0;
+        rexB = (rex & 0x01) ? 8 : 0;
+    }
+
+    u8 opcode = code[offset++];
+
+    // 0x90: NOP
+    if (opcode == 0x90) {
+        inst.type = OpcodeType::Unknown;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xF4: HLT
+    if (opcode == 0xF4) {
+        inst.type = OpcodeType::Halt;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0x0B: HLE Trap (UD2) followed by 32-bit hook ID
+    if (opcode == 0x0F && code[offset] == 0x0B) {
+        offset++;
+        inst.type = OpcodeType::HleTrap;
+        inst.immediate = *reinterpret_cast<const u32*>(code + offset);
+        offset += 4;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xB8 + reg: MOV r64, imm64
+    if (rexW && (opcode >= 0xB8 && opcode <= 0xBF)) {
+        inst.type = OpcodeType::Mov;
+        inst.regDest = (opcode - 0xB8) | rexB;
+        inst.immediate = *reinterpret_cast<const u64*>(code + offset);
+        inst.hasImmediate = true;
+        offset += 8;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x50 + reg: PUSH r64
+    if (opcode >= 0x50 && opcode <= 0x57) {
+        inst.type = OpcodeType::Push;
+        inst.regSrc = (opcode - 0x50) | rexB;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x58 + reg: POP r64
+    if (opcode >= 0x58 && opcode <= 0x5F) {
+        inst.type = OpcodeType::Pop;
+        inst.regDest = (opcode - 0x58) | rexB;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x31: XOR r/m64, r64
+    if (rexW && opcode == 0x31) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Xor;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x01: ADD r/m64, r64
+    if (rexW && opcode == 0x01) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Add;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x89: MOV r/m64, r64
+    if (rexW && opcode == 0x89) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Mov;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x8B: MOV r64, r/m64
+    if (rexW && opcode == 0x8B) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Mov;
+        inst.regDest = ((modrm >> 3) & 0x07) | rexR;
+        inst.regSrc = (modrm & 0x07) | rexB;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x83 / 0x81: ADD/SUB r64, imm
+    if (rexW && (opcode == 0x83 || opcode == 0x81)) {
+        u8 modrm = code[offset++];
+        u8 subop = (modrm >> 3) & 0x07;
+        inst.regDest = (modrm & 0x07) | rexB;
+
+        if (subop == 0) inst.type = OpcodeType::Add;
+        else if (subop == 5) inst.type = OpcodeType::Sub;
+
+        if (opcode == 0x83) {
+            inst.immediate = static_cast<s64>(static_cast<s8>(code[offset++]));
+        } else {
+            inst.immediate = static_cast<s64>(*reinterpret_cast<const s32*>(code + offset));
+            offset += 4;
+        }
+        inst.hasImmediate = true;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xE8: CALL rel32
+    if (opcode == 0xE8) {
+        inst.type = OpcodeType::Call;
+        inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+        offset += 4;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xC3: RET
+    if (opcode == 0xC3) {
+        inst.type = OpcodeType::Ret;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xEB: JMP rel8
+    if (opcode == 0xEB) {
+        inst.type = OpcodeType::Jmp;
+        inst.displacement = static_cast<s8>(code[offset++]);
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xE9: JMP rel32
+    if (opcode == 0xE9) {
+        inst.type = OpcodeType::Jmp;
+        inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+        offset += 4;
+        inst.length = offset;
+        return inst;
+    }
+
+    // Unknown opcode
+    inst.type = OpcodeType::Unknown;
+    inst.length = 1;
+    return inst;
+}
+
+Interpreter::Interpreter(CpuContext& ctx, MemoryManager& memory)
+    : m_ctx(ctx), m_memory(memory) {}
+
+bool Interpreter::Step() {
+    if (m_halted) return false;
+
+    void* hostPtr = m_memory.Translate(m_ctx.rip);
+    if (!hostPtr) {
+        LOG_FATAL("Interpreter", "Access violation at RIP: 0x" + std::to_string(m_ctx.rip));
+        m_halted = true;
+        return false;
+    }
+
+    const u8* code = reinterpret_cast<const u8*>(hostPtr);
+    DecodedInstruction inst = X86Decoder::Decode(code, m_ctx.rip);
+
+    u64 currentRip = m_ctx.rip;
+    m_ctx.rip += inst.length;
+    m_instructionsExecuted++;
+
+    switch (inst.type) {
+        case OpcodeType::Halt:
+            LOG_INFO("Interpreter", "HLT instruction executed. Execution finished.");
+            m_halted = true;
+            return false;
+
+        case OpcodeType::Mov: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            if (inst.hasImmediate) {
+                if (dst) *dst = inst.immediate;
+            } else {
+                u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+                if (dst && src) *dst = *src;
+            }
+            break;
+        }
+
+        case OpcodeType::Xor: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+            if (dst && src) {
+                *dst ^= *src;
+                // Update basic zero flag in RFLAGS
+                if (*dst == 0) m_ctx.rflags |= 0x40; // ZF = 1
+                else m_ctx.rflags &= ~0x40;
+            }
+            break;
+        }
+
+        case OpcodeType::Add: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            if (inst.hasImmediate) {
+                if (dst) *dst += inst.immediate;
+            } else {
+                u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+                if (dst && src) *dst += *src;
+            }
+            break;
+        }
+
+        case OpcodeType::Sub: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            if (dst) *dst -= inst.immediate;
+            break;
+        }
+
+        case OpcodeType::Push: {
+            u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+            m_ctx.rsp -= 8;
+            if (src) m_memory.Write<u64>(m_ctx.rsp, *src);
+            break;
+        }
+
+        case OpcodeType::Pop: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            if (dst) *dst = m_memory.Read<u64>(m_ctx.rsp);
+            m_ctx.rsp += 8;
+            break;
+        }
+
+        case OpcodeType::Call: {
+            // Push return address
+            m_ctx.rsp -= 8;
+            m_memory.Write<u64>(m_ctx.rsp, m_ctx.rip);
+            m_ctx.rip = m_ctx.rip + inst.displacement;
+            break;
+        }
+
+        case OpcodeType::Ret: {
+            m_ctx.rip = m_memory.Read<u64>(m_ctx.rsp);
+            m_ctx.rsp += 8;
+            break;
+        }
+
+        case OpcodeType::Jmp: {
+            m_ctx.rip = m_ctx.rip + inst.displacement;
+            break;
+        }
+
+        case OpcodeType::HleTrap: {
+            u32 hookId = static_cast<u32>(inst.immediate);
+            std::stringstream ss;
+            ss << "HLE Trap triggered! HookID = " << hookId;
+            LOG_DEBUG("Interpreter", ss.str());
+
+            // Check if called via CALL (valid stack return address)
+            u64 retAddr = m_memory.Read<u64>(m_ctx.rsp);
+            if (retAddr >= GUEST_MEMORY_BASE) {
+                m_ctx.rip = retAddr;
+                m_ctx.rsp += 8;
+            }
+            break;
+        }
+
+        case OpcodeType::Unknown:
+        default:
+            LOG_WARN("Interpreter", "Skipping unhandled opcode at 0x" + std::to_string(currentRip));
+            break;
+    }
+
+    return true;
+}
+
+bool Interpreter::Run(u64 maxInstructions) {
+    LOG_INFO("Interpreter", "Entering x86-64 Zen 2 execution loop...");
+    while (!m_halted && m_instructionsExecuted < maxInstructions) {
+        if (!Step()) break;
+    }
+
+    std::stringstream ss;
+    ss << "Execution halted after " << m_instructionsExecuted << " instructions.";
+    LOG_INFO("Interpreter", ss.str());
+    return true;
+}
+
+} // namespace Scarlett
