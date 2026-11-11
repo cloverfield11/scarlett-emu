@@ -117,7 +117,7 @@ int main(int argc, char* argv[]) {
     LOG_INFO("Core", "Dispatching to Entry Point: 0x" + std::to_string(cpu.rip));
     cpu.DumpState();
 
-    Scarlett::Interpreter interp(cpu, memory);
+    Scarlett::Interpreter interp(cpu, memory, &kernel, &loader.GetImports());
     interp.Run();
 
     return 0;

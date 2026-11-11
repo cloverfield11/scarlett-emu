@@ -16,10 +16,13 @@ enum class OpcodeType {
     Add,
     Sub,
     Xor,
+    Test,
     Cmp,
     Jmp,
-    Jcc,
+    Je,
+    Jne,
     Call,
+    CallIndirect,
     Ret,
     Push,
     Pop,
@@ -36,6 +39,7 @@ struct DecodedInstruction {
     s32 displacement{0};
     bool hasImmediate{false};
     bool isRipRelative{false};
+    bool isMemoryStore{false};
 };
 
 class X86Decoder {
@@ -43,9 +47,12 @@ public:
     static DecodedInstruction Decode(const u8* code, u64 rip);
 };
 
+class HleKernel;
+struct ImportedFunction;
+
 class Interpreter {
 public:
-    Interpreter(CpuContext& ctx, MemoryManager& memory);
+    Interpreter(CpuContext& ctx, MemoryManager& memory, HleKernel* kernel = nullptr, const std::vector<ImportedFunction>* imports = nullptr);
 
     // Execute a single x86_64 instruction at RIP
     bool Step();
@@ -59,6 +66,8 @@ public:
 private:
     CpuContext& m_ctx;
     MemoryManager& m_memory;
+    HleKernel* m_kernel{nullptr};
+    const std::vector<ImportedFunction>* m_imports{nullptr};
     bool m_halted{false};
     u64 m_instructionsExecuted{0};
 };

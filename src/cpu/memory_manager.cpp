@@ -49,18 +49,6 @@ GuestAddr MemoryManager::Allocate(u64 size, MemoryProtection protection, GuestAd
         m_nextAllocOffset += alignedSize;
     }
 
-    int prot = PROT_NONE;
-    switch (protection) {
-        case MemoryProtection::ReadOnly: prot = PROT_READ; break;
-        case MemoryProtection::ReadWrite: prot = PROT_READ | PROT_WRITE; break;
-        case MemoryProtection::ExecuteRead: prot = PROT_READ | PROT_EXEC; break;
-        case MemoryProtection::ExecuteReadWrite: prot = PROT_READ | PROT_WRITE | PROT_EXEC; break;
-        default: break;
-    }
-
-    void* targetHostPtr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(m_hostBase) + guestAddr);
-    mprotect(targetHostPtr, alignedSize, prot);
-
     std::stringstream ss;
     ss << "Allocated 0x" << std::hex << alignedSize << " bytes at GuestAddr 0x" << guestAddr;
     LOG_DEBUG("Memory", ss.str());
@@ -69,27 +57,12 @@ GuestAddr MemoryManager::Allocate(u64 size, MemoryProtection protection, GuestAd
 }
 
 bool MemoryManager::Free(GuestAddr address) {
-    // Soft unmap / reset protection
-    void* hostPtr = Translate(address);
-    if (!hostPtr) return false;
-    mprotect(hostPtr, PAGE_SIZE, PROT_NONE);
     return true;
 }
 
 bool MemoryManager::Protect(GuestAddr address, u64 size, MemoryProtection protection) {
-    void* hostPtr = Translate(address);
-    if (!hostPtr) return false;
-
-    int prot = PROT_NONE;
-    switch (protection) {
-        case MemoryProtection::ReadOnly: prot = PROT_READ; break;
-        case MemoryProtection::ReadWrite: prot = PROT_READ | PROT_WRITE; break;
-        case MemoryProtection::ExecuteRead: prot = PROT_READ | PROT_EXEC; break;
-        case MemoryProtection::ExecuteReadWrite: prot = PROT_READ | PROT_WRITE | PROT_EXEC; break;
-        default: break;
-    }
-
-    return mprotect(hostPtr, size, prot) == 0;
+    // Guest protection tracked logically without restricting host memory access
+    return true;
 }
 
 void* MemoryManager::Translate(GuestAddr guestAddress) {

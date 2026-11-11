@@ -142,6 +142,16 @@ bool PeLoader::MapSections(const std::vector<u8>& rawData) {
     return true;
 }
 
+#pragma pack(push, 1)
+struct ImageImportDescriptor {
+    u32 originalFirstThunk;
+    u32 timeDateStamp;
+    u32 forwarderChain;
+    u32 name;
+    u32 firstThunk;
+};
+#pragma pack(pop)
+
 bool PeLoader::ParseImports(const std::vector<u8>& rawData) {
     const auto& importDir = m_optHeader.dataDirectory[1]; // IMAGE_DIRECTORY_ENTRY_IMPORT
     if (importDir.virtualAddress == 0 || importDir.size == 0) {
@@ -149,7 +159,86 @@ bool PeLoader::ParseImports(const std::vector<u8>& rawData) {
         return true;
     }
 
-    LOG_INFO("Loader", "Parsing Xbox GameOS / Scarlett import directory...");
+    LOG_INFO("Loader", "Resolving Scarlett GameOS Import Address Table (IAT)...");
+
+    GuestAddr importDescAddr = m_imageBase + importDir.virtualAddress;
+    u32 descOffset = 0;
+
+    // Allocate a pool for HLE trampolines in guest space
+    GuestAddr trampolinePool = m_memory.Allocate(0x10000, MemoryProtection::ExecuteReadWrite, 0x150000000);
+    u32 trampolineOffset = 0;
+
+    while (true) {
+        ImageImportDescriptor desc{};
+        m_memory.ReadBytes(importDescAddr + descOffset, &desc, sizeof(desc));
+
+        // A null descriptor marks the end of the import directory
+        if (desc.name == 0 && desc.firstThunk == 0) break;
+
+        // Read DLL Name
+        char dllNameBuf[128] = {0};
+        m_memory.ReadBytes(m_imageBase + desc.name, dllNameBuf, sizeof(dllNameBuf) - 1);
+        std::string dllName = dllNameBuf;
+
+        LOG_INFO("Loader", "  Importing module: " + dllName);
+
+        u32 thunkRva = desc.originalFirstThunk ? desc.originalFirstThunk : desc.firstThunk;
+        u32 iatRva = desc.firstThunk;
+        u32 index = 0;
+
+        while (true) {
+            u64 thunkValue = m_memory.Read<u64>(m_imageBase + thunkRva + index * 8);
+            if (thunkValue == 0) break;
+
+            std::string funcName;
+            if ((thunkValue & 0x8000000000000000ULL) == 0) {
+                // Import by name
+                u32 nameRva = static_cast<u32>(thunkValue & 0x7FFFFFFF);
+                char funcNameBuf[128] = {0};
+                m_memory.ReadBytes(m_imageBase + nameRva + 2, funcNameBuf, sizeof(funcNameBuf) - 1); // skip 2-byte hint
+                funcName = funcNameBuf;
+            } else {
+                funcName = "Ordinal_" + std::to_string(thunkValue & 0xFFFF);
+            }
+
+            // Create HLE trampoline:
+            // 0F 0B [HookID: 4 bytes] C3
+            u32 hookId = static_cast<u32>(m_imports.size() + 1);
+            GuestAddr trampolineAddr = trampolinePool + trampolineOffset;
+
+            u8 trampolineCode[7] = {
+                0x0F, 0x0B,
+                static_cast<u8>(hookId & 0xFF),
+                static_cast<u8>((hookId >> 8) & 0xFF),
+                static_cast<u8>((hookId >> 16) & 0xFF),
+                static_cast<u8>((hookId >> 24) & 0xFF),
+                0xC3 // ret
+            };
+            m_memory.WriteBytes(trampolineAddr, trampolineCode, sizeof(trampolineCode));
+            trampolineOffset += 16; // Align to 16 bytes
+
+            // Patch IAT entry to point to our trampoline
+            GuestAddr iatEntryAddr = m_imageBase + iatRva + index * 8;
+            m_memory.Write<u64>(iatEntryAddr, trampolineAddr);
+
+            ImportedFunction imp{};
+            imp.moduleName = dllName;
+            imp.functionName = funcName;
+            imp.iatAddress = iatEntryAddr;
+            m_imports.push_back(imp);
+
+            std::stringstream ss;
+            ss << "    [IAT 0x" << std::hex << iatEntryAddr << "] -> " << dllName << "!" << funcName
+               << " (Trampoline: 0x" << trampolineAddr << ")";
+            LOG_DEBUG("Loader", ss.str());
+
+            index++;
+        }
+
+        descOffset += sizeof(ImageImportDescriptor);
+    }
+
+    LOG_INFO("Loader", "Successfully resolved " + std::to_string(m_imports.size()) + " IAT import functions.");
     return true;
 }
 

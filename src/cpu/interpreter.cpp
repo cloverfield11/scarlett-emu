@@ -1,5 +1,6 @@
 #include "cpu/interpreter.h"
 #include "kernel/hle_kernel.h"
+#include "loader/pe_loader.h"
 #include "common/logging.h"
 #include <iomanip>
 #include <sstream>
@@ -68,41 +69,117 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
         return inst;
     }
 
-    // 0xB8 + reg: MOV r64, imm64
-    if (rexW && (opcode >= 0xB8 && opcode <= 0xBF)) {
+    // 0xB8 - 0xBF: MOV r32/r64, imm32/imm64
+    if (opcode >= 0xB8 && opcode <= 0xBF) {
         inst.type = OpcodeType::Mov;
         inst.regDest = (opcode - 0xB8) | rexB;
-        inst.immediate = *reinterpret_cast<const u64*>(code + offset);
+        if (rexW) {
+            inst.immediate = *reinterpret_cast<const u64*>(code + offset);
+            offset += 8;
+        } else {
+            inst.immediate = static_cast<u64>(*reinterpret_cast<const u32*>(code + offset));
+            offset += 4;
+        }
         inst.hasImmediate = true;
-        offset += 8;
         inst.length = offset;
         return inst;
     }
 
-    // 0x50 + reg: PUSH r64
-    if (opcode >= 0x50 && opcode <= 0x57) {
-        inst.type = OpcodeType::Push;
-        inst.regSrc = (opcode - 0x50) | rexB;
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x58 + reg: POP r64
-    if (opcode >= 0x58 && opcode <= 0x5F) {
-        inst.type = OpcodeType::Pop;
-        inst.regDest = (opcode - 0x58) | rexB;
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x31: XOR r/m64, r64
-    if (rexW && opcode == 0x31) {
+    // 0x31: XOR r/m32 or r/m64
+    if (opcode == 0x31) {
         u8 modrm = code[offset++];
         inst.type = OpcodeType::Xor;
         inst.regDest = (modrm & 0x07) | rexB;
         inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
         inst.length = offset;
         return inst;
+    }
+
+    // 0x74: JE rel8
+    if (opcode == 0x74) {
+        inst.type = OpcodeType::Je;
+        inst.displacement = static_cast<s8>(code[offset++]);
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x75: JNE rel8
+    if (opcode == 0x75) {
+        inst.type = OpcodeType::Jne;
+        inst.displacement = static_cast<s8>(code[offset++]);
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xC7 /0: MOV r/m32, imm32 (e.g. movl $imm, disp(%rax))
+    if (opcode == 0xC7) {
+        u8 modrm = code[offset++];
+        u8 subop = (modrm >> 3) & 0x07;
+        if (subop == 0) {
+            inst.type = OpcodeType::Mov;
+            inst.regDest = (modrm & 0x07) | rexB; // base register
+            u8 mod = (modrm >> 6) & 0x03;
+            if (mod == 0) {
+                inst.displacement = 0;
+                inst.isMemoryStore = true;
+            } else if (mod == 1) {
+                inst.displacement = static_cast<s8>(code[offset++]);
+                inst.isMemoryStore = true;
+            } else if (mod == 2) {
+                inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+                offset += 4;
+                inst.isMemoryStore = true;
+            }
+            inst.immediate = static_cast<u64>(*reinterpret_cast<const u32*>(code + offset));
+            offset += 4;
+            inst.hasImmediate = true;
+            inst.length = offset;
+            return inst;
+        }
+    }
+    if (opcode == 0x85) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Test;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0x84: JE rel32
+    if (opcode == 0x0F && code[offset] == 0x84) {
+        offset++;
+        inst.type = OpcodeType::Je;
+        inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+        offset += 4;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0x85: JNE rel32
+    if (opcode == 0x0F && code[offset] == 0x85) {
+        offset++;
+        inst.type = OpcodeType::Jne;
+        inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+        offset += 4;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xFF /2: CALL near absolute indirect (e.g. call *disp(%rip))
+    if (opcode == 0xFF) {
+        u8 modrm = code[offset++];
+        u8 subop = (modrm >> 3) & 0x07;
+        if (subop == 2) { // CALL near indirect
+            inst.type = OpcodeType::CallIndirect;
+            if ((modrm & 0xC7) == 0x05) { // [rip + disp32]
+                inst.isRipRelative = true;
+                inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+                offset += 4;
+            }
+            inst.length = offset;
+            return inst;
+        }
     }
 
     // 0x01: ADD r/m64, r64
@@ -194,8 +271,8 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     return inst;
 }
 
-Interpreter::Interpreter(CpuContext& ctx, MemoryManager& memory)
-    : m_ctx(ctx), m_memory(memory) {}
+Interpreter::Interpreter(CpuContext& ctx, MemoryManager& memory, HleKernel* kernel, const std::vector<ImportedFunction>* imports)
+    : m_ctx(ctx), m_memory(memory), m_kernel(kernel), m_imports(imports) {}
 
 bool Interpreter::Step() {
     if (m_halted) return false;
@@ -222,7 +299,12 @@ bool Interpreter::Step() {
 
         case OpcodeType::Mov: {
             u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
-            if (inst.hasImmediate) {
+            if (inst.isMemoryStore) {
+                if (dst) {
+                    GuestAddr targetAddr = *dst + inst.displacement;
+                    m_memory.Write<u32>(targetAddr, static_cast<u32>(inst.immediate));
+                }
+            } else if (inst.hasImmediate) {
                 if (dst) *dst = inst.immediate;
             } else {
                 u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
@@ -282,6 +364,43 @@ bool Interpreter::Step() {
             break;
         }
 
+        case OpcodeType::CallIndirect: {
+            GuestAddr targetPtrAddr = currentRip + inst.length + inst.displacement;
+            GuestAddr targetAddr = m_memory.Read<GuestAddr>(targetPtrAddr);
+            std::stringstream ss;
+            ss << "CallIndirect: reading IAT from 0x" << std::hex << targetPtrAddr << " -> target: 0x" << targetAddr;
+            LOG_DEBUG("Interpreter", ss.str());
+            m_ctx.rsp -= 8;
+            m_memory.Write<u64>(m_ctx.rsp, m_ctx.rip);
+            m_ctx.rip = targetAddr;
+            break;
+        }
+
+        case OpcodeType::Test: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+            if (dst && src) {
+                u64 res = *dst & *src;
+                if (res == 0) m_ctx.rflags |= 0x40; // ZF = 1
+                else m_ctx.rflags &= ~0x40;
+            }
+            break;
+        }
+
+        case OpcodeType::Je: {
+            if (m_ctx.rflags & 0x40) {
+                m_ctx.rip = m_ctx.rip + inst.displacement;
+            }
+            break;
+        }
+
+        case OpcodeType::Jne: {
+            if (!(m_ctx.rflags & 0x40)) {
+                m_ctx.rip = m_ctx.rip + inst.displacement;
+            }
+            break;
+        }
+
         case OpcodeType::Ret: {
             m_ctx.rip = m_memory.Read<u64>(m_ctx.rsp);
             m_ctx.rsp += 8;
@@ -298,6 +417,17 @@ bool Interpreter::Step() {
             std::stringstream ss;
             ss << "HLE Trap triggered! HookID = " << hookId;
             LOG_DEBUG("Interpreter", ss.str());
+
+            if (m_kernel && m_imports && hookId > 0 && hookId <= m_imports->size()) {
+                const auto& imp = (*m_imports)[hookId - 1];
+                LOG_INFO("HLE", "Dispatching GameOS Call: " + imp.moduleName + "!" + imp.functionName);
+                m_kernel->ExecuteHook(imp.moduleName, imp.functionName, m_ctx);
+
+                if (imp.functionName == "ExitProcess") {
+                    m_halted = true;
+                    return false;
+                }
+            }
 
             // Check if called via CALL (valid stack return address)
             u64 retAddr = m_memory.Read<u64>(m_ctx.rsp);
