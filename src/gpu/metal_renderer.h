@@ -18,6 +18,11 @@ public:
 
     std::string GetGpuName() const;
 
+    void SetHeadless(bool headless);
+    void SetGameFrameActive(bool active);
+    void SetClearColor(float r, float g, float b, float a);
+    void SubmitFramebufferRGBA8(const u8* rgba, u32 width, u32 height, u32 rowPitch);
+
 private:
     struct Impl;
     Impl* m_impl{nullptr};

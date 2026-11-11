@@ -20,6 +20,6 @@ using GuestAddr = u64;
 
 constexpr u64 PAGE_SIZE = 4096;
 constexpr u64 GUEST_MEMORY_BASE = 0x0000000100000000ULL; // 4GB base
-constexpr u64 GUEST_MEMORY_SIZE = 0x0000000280000000ULL; // 10GB for Series S unified RAM
+constexpr u64 GUEST_MEMORY_SIZE = 0x0000002000000000ULL; // 128GB virtual address space for unified RAM, heap, and VM arenas
 
 } // namespace Scarlett

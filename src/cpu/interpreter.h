@@ -38,6 +38,8 @@ enum class OpcodeType {
     Sar,
     Rol,
     Ror,
+    Rcl,
+    Rcr,
     Mul,
     Imul,
     Div,
@@ -62,8 +64,11 @@ enum class OpcodeType {
     Movs,
     Movdqa,
     Movdqu,
-    Movq,
+    MovqFromGp,
+    MovqToGp,
+    MovqXmm,
     Movsd,
+    Movss,
     Punpcklbw,
     Xorps,
     Andps,
@@ -72,16 +77,22 @@ enum class OpcodeType {
     Subsd,
     Mulsd,
     Divsd,
+    Minsd,
+    Maxsd,
     Addss,
     Subss,
     Mulss,
     Divss,
+    Minss,
+    Maxss,
     Rsqrtss,
     Rcpss,
     Addps,
     Subps,
     Mulps,
     Divps,
+    Minps,
+    Maxps,
     Sqrtps,
     Rsqrtps,
     Rcpps,
@@ -89,12 +100,27 @@ enum class OpcodeType {
     Subpd,
     Mulpd,
     Divpd,
+    Minpd,
+    Maxpd,
     Andnps,
     Movmskps,
     Cvtsd2ss,
     Cvtss2sd,
+    Cvtps2pd,
+    Cvtpd2ps,
+    Cvtdq2ps,
+    Cvtps2dq,
+    Cvttps2dq,
+    Cvttpd2dq,
+    Cvtpd2dq,
+    Cvtdq2pd,
+    Cmpps,
+    Cmppd,
+    Cmpss,
+    Cmpsd,
     Sqrtss,
     Sqrtsd,
+    Comiss,
     Comisd,
     Cvtsi2sd,
     Cvtsi2ss,
@@ -109,9 +135,24 @@ enum class OpcodeType {
     Bts,
     Btr,
     Btc,
+    Psrlw,
+    Psllw,
+    Psraw,
     Psrlq,
-    Psubq,
+    Psrldq,
+    Psllq,
+    Pslldq,
+    Psrld,
+    Pslld,
+    Psrad,
+    Psubb,
+    Psubw,
     Psubd,
+    Psubq,
+    Paddb,
+    Paddw,
+    Paddd,
+    Paddq,
     Pshuflw,
     Pshufhw,
     Pshufd,
@@ -126,6 +167,9 @@ enum class OpcodeType {
     Punpckhqdq,
     Punpcklwd,
     Punpckldq,
+    Punpckhbw,
+    Punpckhwd,
+    Punpckhdq,
     Vzeroupper,
     Vpxor,
     Vpcmpeqb,
@@ -133,8 +177,69 @@ enum class OpcodeType {
     Vpcmpeqd,
     Vmovdqa,
     Vmovdqu,
+    Vmovss,
+    Vmovsd,
+    Vcvtss2sd,
+    Vcvtsd2ss,
+    Vcvtps2pd,
+    Vcvtpd2ps,
+    Vcvtpd2dq,
+    Vcvtsi2ss,
+    Vcvtsi2sd,
+    Vcvtss2si,
+    Vcvtsd2si,
+    Vcvttss2si,
+    Vcvttsd2si,
+    Vcvtdq2ps,
+    Vcvtps2dq,
+    Vcvttps2dq,
+    Vcvttpd2dq,
+    Vcvtdq2pd,
+    Vpsrld,
+    Vpslld,
+    Vpsrad,
+    Vpsrlq,
+    Vpsllq,
+    Vpsrldq,
+    Vpslldq,
+    Vpaddd,
+    Vpsubd,
+    Vpaddq,
+    Vpsubq,
+    Vpshufd,
+    Vpunpckldq,
+    Vunpcklps,
+    Vunpcklpd,
+    Vandps,
+    Vandnps,
+    Vorps,
+    Vaddps,
+    Vaddpd,
+    Vaddss,
+    Vaddsd,
+    Vsubps,
+    Vsubpd,
+    Vsubss,
+    Vsubsd,
+    Vmulps,
+    Vmulpd,
+    Vmulss,
+    Vmulsd,
+    Vdivps,
+    Vdivpd,
+    Vdivss,
+    Vdivsd,
+    Vshufps,
+    Vpmovsxdq,
+    Vpcmpeqq,
+    Vfma,
     Pcmpistri,
-    Unpcklps
+    Unpcklps,
+    Unpcklpd,
+    Shufps,
+    Shufpd,
+    Fnstcw,
+    Stmxcsr
 };
 
 struct Operand {
@@ -197,13 +302,32 @@ public:
     u64 GetInstructionsExecuted() const { return m_instructionsExecuted; }
 
 private:
+    struct TraceEntry {
+        u64 rip{0};
+        u64 rsp{0};
+        u8 bytes[8]{};
+        u8 len{0};
+    };
+    struct DecodeCacheEntry {
+        u64 rip{0};
+        u64 code0{0};
+        u64 code1{0};
+        DecodedInstruction inst{};
+    };
+    static constexpr size_t DECODE_CACHE_SIZE = 16384;
+    static constexpr size_t TRACE_SIZE = 64;
+
     CpuContext& m_ctx;
     MemoryManager& m_memory;
     HleKernel* m_kernel{nullptr};
     const std::vector<ImportedFunction>* m_imports{nullptr};
     bool m_halted{false};
     u64 m_instructionsExecuted{0};
+    std::vector<DecodeCacheEntry> m_decodeCache;
+    TraceEntry m_trace[TRACE_SIZE]{};
+    size_t m_traceIdx{0};
 
+    void DumpRecentTrace() const;
     u64 ReadOperand(const Operand& op, u8 instLen) const;
     void WriteOperand(const Operand& op, u64 val, u8 instLen, bool hasRex);
     void UpdateFlagsArithmetic(u64 result, u64 op1, u64 op2, u8 opSize, bool isSub, bool updateCarry = true);

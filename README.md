@@ -154,7 +154,7 @@ The memory subsystem is responsible for creating an emulation environment that s
 
 ```cpp
 constexpr u64 GUEST_MEMORY_BASE = 0x0000000100000000ULL; // 4 GB Base Offset
-constexpr u64 GUEST_MEMORY_SIZE = 0x0000000280000000ULL; // 10 GB Total Allocation
+constexpr u64 GUEST_MEMORY_SIZE = 0x0000002000000000ULL; // 128 GB Virtual Address Arena (heap, VM reserves, GDDR6)
 ```
 
 ```
@@ -167,21 +167,22 @@ constexpr u64 GUEST_MEMORY_SIZE = 0x0000000280000000ULL; // 10 GB Total Allocati
   |
   +--> [Guest Offset 0x0001000000] - 0x0002000000 : HLE Trampoline Pool (16 MB)
   |
-  +--> [Guest Offset 0x0002000000] - 0x0040000000 : Dynamic Allocations (VirtualAlloc)
+  +--> [Guest Offset 0x0002000000] - 0x0040000000 : Dynamic Allocations (VirtualAlloc / Free-List)
   |
   +--> [Guest Offset 0x0040000000] - 0x0140000000 : Game Partition Space
   |
   +--> [Guest Offset 0x0140000000] - 0x0140006000 : Mapped Executable Sections (.text, .rdata, .idata)
   |
-  +--> [Guest Offset 0x0280000000] : 10 GB Boundary Limit
+  +--> [Guest Offset 0x2000000000] : 128 GB Arena Upper Limit
 ```
 
 #### Key Implementation Characteristics:
-* **Anonymous Virtual Allocation:** Allocates the full 10 GB unified block via `mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0)`.
+* **Sparse Anonymous Virtual Arena:** Reserves a contiguous 128 GB unified address space via `mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0)` so host RSS only commits touched pages.
+* **Free-List Reuse & Page Reclamation:** `MemoryManager::Allocate` / `Free` implements first-fit free-list interval reuse, coalescing, and `MAP_FIXED` anonymous remapping on `VirtualFree(MEM_RELEASE)` to reclaim physical host pages.
 * **Granular Sub-allocations:** Sub-allocations (requested via the guest `VirtualAlloc` API) are managed with 64 KB alignment granularity matching the Windows memory manager specification.
 * **Fast Translation Primitive:** Guest addresses are translated to host pointers via pointer arithmetic:
   $$\text{HostPointer} = \text{HostBase} + \text{GuestAddress}$$
-  Bounds checks guarantee that requests outside the 10 GB address space trigger controlled fatal access violations rather than undefined host segmentation faults.
+  Bounds checks guarantee that requests outside the 128 GB address arena trigger controlled fatal access violations rather than undefined host segmentation faults.
 
 ---
 
@@ -642,72 +643,51 @@ Commercial games distributed through digital endpoints are delivered within encr
 
 ## 7. Project Status & Roadmap (Текущий статус и дорожная карта)
 
+> **Статус:** На паузе (последняя веха — **12,000,124,660+ инструкций** без сбоев на *The Mortuary Assistant*, многопоточная синхронизация `CRITICAL_SECTION`/`SRWLOCK` и 128 GB виртуальная арена с возвратом страниц ОС).
+
 ### 7.1 What Has Been Accomplished / Что сделано
-- [x] **Unified Memory Architecture (UMA):** 10 GB GDDR6 virtualized address space allocated with POSIX 64 KB page-allocation granularities and host-to-guest pointer translation.
+- [x] **128 GB Unified Memory Arena & Free-List Allocator (`MemoryManager`):**
+  - Виртуальное адресное пространство расширено до **128 GB** (`0x2000000000ULL`) для крупных резерваций Unity / IL2CPP VM.
+  - Реализован first-fit free-list с коалесцингом свободных интервалов, переиспользованием блоков, исправлением `GetCurrentAllocTop()` и возвратом физических страниц ОС (`mmap(..., MAP_FIXED)`) при `VirtualFree(MEM_RELEASE)`.
 - [x] **PE32+ Multi-Module Loader & Base Relocations (`.reloc`):**
   - Automated parsing of 64-bit Windows/GameOS PE32+ executables and dynamic link libraries.
   - Conflict-free virtual address mapping with base relocation engine (`IMAGE_REL_BASED_DIR64` and `IMAGE_REL_BASED_HIGHLOW`) supporting simultaneous loading of modules sharing the same default image base (`0x180000000`).
   - Preloading and dynamic linking of **UnityPlayer.dll** (28.4 MB), **baselib.dll** (386 KB), and **GameAssembly.dll** (45 MB IL2CPP runtime, 4,498 exports).
   - Clean dispatch and execution of DLL initialization (`DllMain` with `DLL_PROCESS_ATTACH`) for loaded engine libraries.
-- [x] **Comprehensive x86-64 AMD Zen 2 CPU Interpreter:**
-  - Full ModR/M and SIB decoding supporting all 16 general-purpose registers, REX prefixes (REX.W/R/X/B), RIP-relative displacement, and GS-relative TEB/PEB segment addressing.
-  - Complete arithmetic & logic operations: `MOV`, `MOVZX`, `MOVSXD`, `MOVSX`, `LEA`, `ADD`, `ADC`, `SUB`, `SBB`, `AND`, `OR`, `XOR`, `NOT`, `NEG`, `SHL`, `SHR`, `SAR`, `ROL`, `ROR`, `MUL`, `IMUL` (including 3-operand immediate forms `0x69/0x6B`), `DIV`, `IDIV`, `INC` / `DEC` (preserving CF flags), `CMP`, `TEST`.
-  - Atomic & exchange primitives: `XCHG`, `XADD`, `CMPXCHG`, `CMPXCHG8B`, `CMPXCHG16B` (for lock-free SLIST free-lists), `LOCK` prefix handling.
-  - Bit-test manipulation: `BT`, `BTS`, `BTR`, `BTC`, `BSF` (TZCNT), `BSR` (LZCNT), `POPCNT`, `BSWAP`.
-  - Control flow: `JMP`, `Jcc` (all 16 condition codes rel8/rel32), `CALL` (rel32 & indirect register/memory), `RET` (standard & imm16 pop), `CMOVcc`, `SETcc`.
-  - String primitives: `REP STOSB / STOSD / STOSQ`, `REP MOVSB / MOVSD / MOVSQ`.
-  - System instructions: `CPUID` (returning AMD Zen 2 Family 17h, AVX2, FMA, BMI1/2 flags), `XGETBV` (OSXSAVE enabled), `UD2` trap stubs, `INT imm8` (Windows `__fastfail` diagnostic dispatch).
-  - SIMD / SSE / AVX / AVX2 instruction coverage:
-    - 128-bit vector moves: `MOVUPS`, `MOVAPS`, `MOVAPD`, `MOVNTPS`, `MOVDQA`, `MOVDQU`.
-    - GPR/XMM transitions: `MOVD / MOVQ` (64-bit GPR <-> low quadword of XMM), `MOVSD`.
-    - Vector interleaving: `PUNPCKLBW`, `UNPCKLPS`, `PUNPCKLDQ`, `PUNPCKLQDQ`.
-    - Bitwise vector logic: `XORPS`, `XORPD`, `ANDPS`, `ANDPD`, `ANDNPS`, `ORPS`, `ORPD`.
-    - Scalar and packed single/double precision math: `ADDSS`, `ADDSD`, `ADDPS`, `ADDPD`, `SUBSS`, `SUBSD`, `SUBPS`, `SUBPD`, `MULSS`, `MULSD`, `MULPS`, `MULPD`, `DIVSS`, `DIVSD`, `DIVPS`, `DIVPD`.
-    - Square root & reciprocal: `SQRTSS`, `SQRTSD`, `SQRTPS`, `RSQRTSS`, `RSQRTPS`, `RCPSS`, `RCPPS`.
-    - Vector mask extraction: `MOVMSKPS`, `PMOVMSKB`.
-    - Floating point comparisons: `COMISD`, `UCOMISD`.
-    - Float/Integer conversions: `CVTSI2SD`, `CVTSI2SS`, `CVTSD2SI`, `CVTSS2SI`, `CVTTSD2SI`, `CVTTSS2SI`, `CVTSD2SS`, `CVTSS2SD`.
-    - 256-bit AVX2 vector operations: 2-byte (`0xC5`) and 3-byte (`0xC4`) VEX prefixes, `VPCMPEQB`, `VPCMPEQW`, `VPCMPEQD`, `VPXOR`, `VMOVDQA`, `VMOVDQU`.
+- [x] **Expanded x86-64 AMD Zen 2 CPU Interpreter (SSE4.2 / AVX / AVX2 / FMA3):**
+  - Full ModR/M, SIB, REX, RIP-relative, and `GS:` TEB/PEB segment addressing.
+  - Integer, bit-test, and atomic primitives: `BT`, `BTS`, `BTR`, `BTC`, `BSF` (TZCNT), `BSR` (LZCNT), `POPCNT`, `BSWAP`, `XCHG`, `XADD`, `CMPXCHG`, `CMPXCHG8B`, `CMPXCHG16B`.
+  - Extended SIMD / SSE / AVX / AVX2 / FMA3 support: 2- and 3-byte VEX prefixes, `VFMADD*`/`VFMSUB*`, `VSHUFPS`, `VPMOVSXDQ`, `VPCMPEQB/W/D/Q`, `VPADDD/Q`, `VPSUBD/Q`, `VPSRLD/Q`, `VPSLLD/Q`, `VPSRAD`, `VPXOR`, `VMOVDQA/U`, `VANDPS`, `VANDNPS`, `VORPS`, `VCVT*`, `PCMPISTRI`, `FNSTCW`, `STMXCSR`, `SHUFPS/D`, `UNPCKLPS/D`.
 - [x] **Virtual File System (VFS) & POSIX Asset Streaming:**
-  - Full path normalization and cross-platform resolution mapping Windows paths (`\\?\`, drive letters, backslashes) to native macOS POSIX directories.
-  - Complete file I/O primitives: `CreateFileW`, `CreateFileA`, `ReadFile`, `WriteFile`, `SetFilePointer`, `SetFilePointerEx`, `GetFileSize`, `GetFileSizeEx`, `FlushFileBuffers`, `CloseHandle`.
-  - POSIX directory enumeration and asset discovery: `FindFirstFileW`, `FindFirstFileA`, `FindFirstFileExW`, `FindNextFileW`, `FindClose` with wildcard pattern matching (`fnmatch`).
-  - Accurate file attributes and 64-bit file size reporting: `GetFileAttributesW`, `GetFileAttributesExW`, `GetFileAttributesA` directly querying host `stat()` structures.
-- [x] **High-Level Operating System Emulation (GameOS / Win32 HLE):**
-  - Over 110 foundational OS APIs implemented across `KERNEL32.dll`, `ntdll.dll`, `user32.dll`, `ole32.dll`, `oleaut32.dll`, `bcrypt.dll`, `version.dll`, `advapi32.dll`, `shell32.dll`.
-  - Dedicated zero-fragmentation bump heap allocator for `HeapAlloc` and `HeapReAlloc` (`0x280000000`), alongside page-aligned `VirtualAlloc` (allocating 512 MB+ GDDR6 buffers), `VirtualFree`, `VirtualProtect`.
-  - Dynamic module loading: `LoadLibraryA`, `LoadLibraryW`, `LoadLibraryExW`, `GetProcAddress` (resolving against loaded PE module EAT exports or HLE hooks), `FreeLibrary`.
-  - Threading & synchronization: `InitializeCriticalSectionAndSpinCount`, `EnterCriticalSection`, `LeaveCriticalSection`, `DeleteCriticalSection`, `InitializeSRWLock`, `AcquireSRWLockExclusive/Shared`, `ReleaseSRWLockExclusive/Shared`, `CreateMutexW`, `CreateSemaphoreW`, `ReleaseSemaphore`, `WaitForSingleObjectEx`, `InitializeSListHead`, `TlsAlloc`, `TlsGetValue`, `TlsSetValue`, `TlsFree`.
-  - Hardware & system topology: `GetNativeSystemInfo`, `GetSystemInfo` (AMD64, 8 Zen 2 cores, 4KB pages, 64KB granularity), `GetLogicalProcessorInformationEx`.
-  - Windowing & message pump stubs: `RegisterClassExW`, `CreateWindowExW`, `ShowWindow`, `UpdateWindow`, `GetClientRect`, `GetWindowRect`, `PeekMessageW`, `DispatchMessageW`, `TranslateMessage`, `MessageBoxA/W`.
-  - Cryptography & COM: `BCryptGenRandom` (macOS `arc4random_buf` bridge), `CoInitializeEx`, `CoCreateInstance`, `SysAllocStringLen`, `SysFreeString`, `SysStringLen`.
-- [x] **Interactive Real-Time Metal 3 Presentation Loop:**
-  - Cocoa / AppKit window creation (`NSWindow`, `NSApplication`) initialized seamlessly on game boot.
-  - Interleaved execution engine: executes x86-64 instruction slices while pumping Cocoa events (`PollEvents()`) and presenting `CAMetalLayer` drawables at 60 FPS.
-  - Interactive controls with keyboard event polling and graceful ESC termination.
-- [x] **Production Commercial Game Verification:**
-  - ***The Mortuary Assistant.exe*** (Unity 64-bit + IL2CPP) executed past **60,000,000 instructions** without crashes or memory violations.
-  - Successfully loaded Unity engine runtime (`UnityPlayer.dll`) and IL2CPP gameplay assembly (`GameAssembly.dll`).
-  - Passed all security canary cookies, Zen 2 CPUID feature detection, memory scanner loops, and CRT threadpools.
+  - Full Windows-to-macOS POSIX path normalization (`\\?\`, drive letters, backslashes), file I/O (`CreateFileW/A`, `ReadFile`, `WriteFile`, `SetFilePointer*`, `GetFileSize*`), directory enumeration (`FindFirstFile*`, `FindNextFileW`), and `stat()` attributes.
+- [x] **Cooperative Multithreading & Real Synchronization (`kernel32` HLE):**
+  - Кооперативный round-robin планировщик для 130+ гостевых потоков с виртуальным временем (`s_virtualMsOffset`), эпохами пробуждения (`s_syncSignalEpoch`), обработкой `WaitForSingleObjectEx`, `WaitForMultipleObjects`, `WakeConditionVariable`, `WakeAllConditionVariable`.
+  - Полноценная взаимная блокировка **`CRITICAL_SECTION`** и **`SRWLOCK`** (`EnterCriticalSection`, `LeaveCriticalSection`, `TryEnterCriticalSection`, `DeleteCriticalSection`, `AcquireSRWLockExclusive/Shared`, `ReleaseSRWLockExclusive/Shared`, `TryAcquireSRWLockExclusive/Shared`, `SleepConditionVariableCS`, `SleepConditionVariableSRW`), устранившая гонку двух активных потоков внутри `tlsf`-аллокатора Unity (`DynamicHeapAllocator`).
+  - Полная поддержка `VirtualQuery`, `VirtualAlloc`/`VirtualFree`, `HeapAlloc`/`HeapReAlloc`/`HeapFree`, `Tls*`/`Fls*`, а также 110+ базовых Win32/GameOS API.
+- [x] **D3D11 / DXGI / D3D12.X COM HLE & Metal 3 Presentation Loop:**
+  - Прокси COM-интерфейсов `ID3D11Device`, `ID3D11DeviceContext`, `IDXGISwapChain`, `IDXGIFactory`, `ID3D11Texture2D`, `ID3D11Buffer`, `ID3D11RenderTargetView`, `ID3D11ShaderResourceView`, и др.
+  - Проброс `ClearRenderTargetView` и backbuffer в `MetalRenderer` (`SetGameFrameActive`, `SetClearColor`, `SubmitFramebufferRGBA8`), интерактивное окно AppKit/Metal и headless-режим `--batch <N>`.
+- [x] **Production Commercial Game Verification (*The Mortuary Assistant*, Unity + IL2CPP):**
+  - Пройдено **12,000,124,660+ инструкций** (12+ млрд) в режиме `--batch` без сбоев и нехватки адресного пространства.
+  - Загружены основные ресурсы и ассеты сцены (`level0`, `sharedassets0.assets`, `sharedassets0.assets.resS`, `sharedassets0.resource`, `il2cpp_data/Resources/mscorlib.dll-resources.dat`), выполнены первые вызовы `IDXGISwapChain::Present` и `DrawIndexed`.
 
 ---
 
 ### 7.2 Current Engineering Focus / Что делаем сейчас
-- [ ] **Direct3D 12 / DXGI Command Submission to Apple Metal:**
-  - Intercepting `ID3D12CommandQueue::ExecuteCommandLists` and translating command lists into native Metal Command Buffers (`MTLCommandBuffer`).
-  - Mapping guest vertex / index buffers into Metal shared storage modes.
-- [ ] **DirectX Intermediate Language (DXIL) to MSL Translation:**
-  - Parsing DXIL bytecode streams from Unity shader caches and decompiling into Metal Shading Language pipelines.
+> Проект поставлен на паузу на следующем этапе перед выводом реальных игровых кадров в окно Metal:
+- [ ] **Проброс D3D11 draw-вызовов и текстур в `MetalRenderer`:**
+  - Движок Unity уже создаёт SwapChain и доходит до `ClearRenderTargetView` и первых `DrawIndexed` вызовов, но привязываемые текстуры (`PSSetShaderResources`, `UpdateSubresource` / `Map`) и геометрия ещё не рендерятся поверх backbuffer'а.
+  - Следующий шаг при возобновлении работы — захват и отрисовка текстур/квадов из `ID3D11DeviceContext` в `MetalRenderer`, чтобы заменить стартовый треугольник реальными кадрами игры.
 
 ---
 
 ### 7.3 What Lies Ahead / Что предстоит
-- [ ] **Audio Subsystem Emulation:**
-  - CoreAudio backend translation for XAudio2 / DirectSound.
-- [ ] **Gamepad & HID Mapping:**
-  - macOS GameController framework mapping for Xbox Wireless Controller / DualSense / Keyboard / Mouse.
+- [ ] **Полноценный D3D11/D3D12 -> Metal пайплайн и трансляция шейдеров (DXBC/DXIL -> MSL):**
+  - Захват вершинных/индексных буферов, текстурных форматов (RGBA8/BGRA8/BCn) и декомпиляция байткода шейдеров в Metal Shading Language.
 - [ ] **ARM64 JIT Dynamic Binary Translation:**
-  - Basic-block and trace JIT compilers emitting native ARM64 instructions for high-throughput 60 FPS real-time execution.
+  - Переход со скалярного интерпретатора (~120–130M инстр/сек) на JIT-компилятор в нативный ARM64 (`pthread_jit_write_protect`) для быстрого запуска тяжёлых Unity-сцен в реальном времени.
+- [ ] **Audio & Input Subsystems:**
+  - CoreAudio бэкенд для XAudio2 / FMOD / DirectSound и маппинг геймпадов/клавиатуры/мыши через GameController / Cocoa.
 
 ---
 

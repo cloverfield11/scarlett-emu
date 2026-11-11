@@ -11,6 +11,8 @@
 #include "kernel/modules/kernel32.h"
 #include <iostream>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 #include <unistd.h>
 
 void PrintBanner() {
@@ -151,6 +153,8 @@ int main(int argc, char* argv[]) {
     // Setup CPU context and TEB/PEB
     Scarlett::CpuContext cpu;
     cpu.gsBase = Scarlett::EnvironmentManager::InitializeTebPeb(memory, loader.GetImageBase());
+    cpu.rsp = Scarlett::GUEST_MEMORY_BASE + 0x800000;
+    Scarlett::Modules::InitMainThread(cpu, memory);
 
     // Execute DllMain for any preloaded DLL modules (e.g. UnityPlayer.dll) with DLL_PROCESS_ATTACH
     for (const auto& mod : loader.GetLoadedModules()) {
@@ -175,8 +179,13 @@ int main(int argc, char* argv[]) {
             dllCpu.r8 = 0;              // lpvReserved
 
             Scarlett::Interpreter dllInterp(dllCpu, memory, &kernel, &loader.GetImports());
-            dllInterp.Run(200000);
-            LOG_INFO("Core", "DllMain for '" + mod.name + "' completed successfully. (Result RAX=" + std::to_string(dllCpu.rax) + ")");
+            Scarlett::u64 dllInstCount = 0;
+            while (!dllInterp.IsHalted() && dllCpu.rip != retHaltAddr && dllCpu.rip != 0 && dllInstCount < 100000000) {
+                dllInterp.Run(500000);
+                dllInstCount += 500000;
+                if (dllCpu.rip == retHaltAddr) break;
+            }
+            LOG_INFO("Core", "DllMain for '" + mod.name + "' completed (Instructions: " + std::to_string(dllInstCount) + ", Result RAX=" + std::to_string(dllCpu.rax) + ", RIP=0x" + std::to_string(dllCpu.rip) + ")");
         }
     }
 
@@ -186,8 +195,6 @@ int main(int argc, char* argv[]) {
 
     LOG_INFO("Core", "Dispatching to Entry Point: 0x" + std::to_string(cpu.rip));
     cpu.DumpState();
-
-    gpu.CreateWindowAndPipeline();
 
     Scarlett::Interpreter interp(cpu, memory, &kernel, &loader.GetImports());
 
@@ -204,34 +211,161 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    const Scarlett::u64 instructionsPerFrame = 1000000; // 1M instructions per slice
+    if (batchLimit == 0) {
+        gpu.CreateWindowAndPipeline();
+    } else {
+        gpu.SetHeadless(true);
+    }
+
+    Scarlett::Modules::InitMainThread(cpu, memory);
+
     Scarlett::u64 totalInstructions = 0;
+    Scarlett::u64 instrSinceRender = 0;
     Scarlett::u32 frame = 0;
+    size_t idleSwitches = 0;
     auto lastStatsTime = std::chrono::steady_clock::now();
 
-    while (gpu.IsRunning() && cpu.rip != 0 && cpu.rip != 0x1500F0000ULL) {
-        interp.Run(instructionsPerFrame);
-        totalInstructions += instructionsPerFrame;
+    while (gpu.IsRunning() && !interp.IsHalted() && !Scarlett::Modules::HasProcessExited() && cpu.rip != 0 && cpu.rip != 0x1500F0000ULL) {
+        auto& threads = Scarlett::Modules::GetThreads();
+        Scarlett::u64 sliceBudget = (threads.size() > 1) ? 200000 : 1000000;
+        Scarlett::u64 beforeSlice = interp.GetInstructionsExecuted();
+        interp.Run(sliceBudget);
+        Scarlett::u64 sliceExecuted = interp.GetInstructionsExecuted() - beforeSlice;
+        totalInstructions += sliceExecuted;
+        instrSinceRender += sliceExecuted;
 
-        gpu.RenderFrame();
-        gpu.PollEvents();
-        frame++;
+        Scarlett::Modules::SaveActiveThreadContext(cpu);
 
-        auto now = std::chrono::steady_clock::now();
-        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatsTime).count();
-        if (elapsedMs >= 2000) {
-            double fps = (frame * 1000.0) / (elapsedMs > 0 ? elapsedMs : 1);
-            LOG_INFO("Core", "Runtime: " + std::to_string((int)fps) + " FPS | Total: " + std::to_string(totalInstructions / 1000000) + "M instructions | RIP=0x" + std::to_string(cpu.rip));
-            frame = 0;
-            lastStatsTime = now;
+        if (Scarlett::Modules::HasProcessExited()) {
+            LOG_INFO("Core", "Guest process exited via ExitProcess/TerminateProcess with code: " + std::to_string(Scarlett::Modules::GetProcessExitCode()));
+            break;
+        }
+        if (interp.IsHalted()) {
+            LOG_ERROR("Core", "Interpreter halted! Dumping final CPU state:");
+            cpu.DumpState();
+            break;
+        }
+
+        // Cooperative round-robin thread scheduler (skips blocked workers until signaled or timed out)
+        bool tickedIdle = false;
+        if (threads.size() > 1) {
+            size_t curIdx = Scarlett::Modules::GetActiveThreadIndex();
+            size_t nextIdx = curIdx;
+            bool found = false;
+            bool hasAlive = false;
+            Scarlett::u64 curEpoch = Scarlett::Modules::GetSyncSignalEpoch();
+            Scarlett::u64 nowMs = Scarlett::Modules::GetCurrentSyncMs();
+            Scarlett::u64 schedRound = Scarlett::Modules::GetSchedulerRound();
+
+            auto isRunnableNow = [&](const Scarlett::Modules::GuestThread& t) -> bool {
+                if (t.exited || t.suspended) return false;
+                if (!t.waiting) return true;
+                if (t.waitIsSleep) {
+                    return nowMs >= t.waitDeadlineMs && (schedRound - t.waitStartRound) >= 1;
+                }
+                if (t.waitObservedEpoch != curEpoch) return true;
+                return !t.waitInfinite && nowMs >= t.waitDeadlineMs && (schedRound - t.waitStartRound) >= 1;
+            };
+
+            const size_t nThreads = threads.size();
+            size_t cand = curIdx;
+            for (size_t step = 0; step < nThreads; ++step) {
+                cand = (cand + 1 < nThreads) ? (cand + 1) : 0;
+                if (!threads[cand].exited && !threads[cand].suspended) {
+                    hasAlive = true;
+                    if (isRunnableNow(threads[cand])) {
+                        nextIdx = cand;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!hasAlive) {
+                LOG_INFO("Core", "All guest threads exited/suspended.");
+                break;
+            }
+            if (!found) {
+                // Every alive thread is blocked: advance virtual clock to earliest finite deadline
+                Scarlett::Modules::AdvanceSchedulerRound(true);
+                tickedIdle = true;
+                curEpoch = Scarlett::Modules::GetSyncSignalEpoch();
+                nowMs = Scarlett::Modules::GetCurrentSyncMs();
+                schedRound = Scarlett::Modules::GetSchedulerRound();
+                cand = curIdx;
+                for (size_t step = 0; step < nThreads; ++step) {
+                    cand = (cand + 1 < nThreads) ? (cand + 1) : 0;
+                    if (isRunnableNow(threads[cand])) {
+                        nextIdx = cand;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    cand = curIdx;
+                    for (size_t step = 0; step < nThreads; ++step) {
+                        cand = (cand + 1 < nThreads) ? (cand + 1) : 0;
+                        if (!threads[cand].exited && !threads[cand].suspended) {
+                            nextIdx = cand;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            } else if (nextIdx <= curIdx) {
+                Scarlett::Modules::AdvanceSchedulerRound(false);
+            }
+            if (nextIdx != curIdx) {
+                Scarlett::Modules::SwitchToThreadIndex(nextIdx, cpu);
+            }
+        } else {
+            Scarlett::Modules::AdvanceSchedulerRound(false);
+        }
+
+        idleSwitches = tickedIdle ? (idleSwitches + 1) : 0;
+
+        if (instrSinceRender >= 1000000 || idleSwitches >= 4096) {
+            instrSinceRender = 0;
+            idleSwitches = 0;
+            if (batchLimit == 0) {
+                gpu.RenderFrame();
+                gpu.PollEvents();
+            }
+            frame++;
+            auto now = std::chrono::steady_clock::now();
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatsTime).count();
+            if (elapsedMs >= 2000) {
+                double fps = (frame * 1000.0) / (elapsedMs > 0 ? elapsedMs : 1);
+                size_t activeCount = 0, waitingCount = 0;
+                for (const auto& t : threads) {
+                    if (t.exited || t.suspended) continue;
+                    if (t.waiting) waitingCount++;
+                    else activeCount++;
+                }
+                std::ostringstream ss;
+                ss << "Runtime: " << (int)fps << " FPS | Total: " << (totalInstructions / 1000000)
+                   << "M | Threads: " << threads.size() << " (run=" << activeCount << ", wait=" << waitingCount
+                   << ") | tid=" << Scarlett::Modules::GetCurrentGuestThreadId()
+                   << " RIP=0x" << std::hex << cpu.rip;
+                LOG_INFO("Core", ss.str());
+                frame = 0;
+                lastStatsTime = now;
+            }
+            if (batchLimit == 0) {
+                usleep(1000); // 1ms yield to macOS Cocoa/Metal compositor
+            }
         }
 
         if (batchLimit > 0 && totalInstructions >= batchLimit) {
             LOG_INFO("Core", "Batch execution limit reached (" + std::to_string(totalInstructions) + " instructions). Exiting loop.");
             break;
         }
+    }
 
-        usleep(1000); // 1ms yield to macOS Cocoa/Metal compositor
+    if (batchLimit > 0) {
+        LOG_INFO("Core", "Top HLE calls:");
+        for (const auto& [name, count] : kernel.GetTopCallStats(15)) {
+            LOG_INFO("Core", "  " + name + ": " + std::to_string(count));
+        }
     }
 
     LOG_INFO("Core", "ScarlettEmu runtime loop exited cleanly. Total instructions: " + std::to_string(totalInstructions));
