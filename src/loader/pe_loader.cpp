@@ -225,6 +225,8 @@ bool PeLoader::ParseImports(const std::vector<u8>& rawData) {
             imp.moduleName = dllName;
             imp.functionName = funcName;
             imp.iatAddress = iatEntryAddr;
+            imp.trampolineAddress = trampolineAddr;
+            imp.hookId = hookId;
             m_imports.push_back(imp);
 
             std::stringstream ss;

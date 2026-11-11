@@ -97,6 +97,8 @@ struct ImportedFunction {
     std::string functionName;
     u16 ordinal{0};
     GuestAddr iatAddress{0};
+    GuestAddr trampolineAddress{0};
+    u32 hookId{0};
 };
 
 class PeLoader {

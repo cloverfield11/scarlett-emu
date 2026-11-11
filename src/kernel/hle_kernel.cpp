@@ -44,6 +44,19 @@ bool HleKernel::ExecuteHook(const std::string& moduleName, const std::string& fu
 void HleKernel::RegisterDefaultModules() {
     Modules::RegisterKernel32(*this);
     Modules::RegisterD3D12X(*this);
+
+    // Register Unity Engine Entry Point
+    RegisterHook("unityplayer.dll", "UnityMain", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        LOG_INFO("Unity", "============================================================");
+        LOG_INFO("Unity", "  🚀 SUCCESS: UnityPlayer.dll!UnityMain EXECUTION REACHED!   ");
+        LOG_INFO("Unity", "============================================================");
+        LOG_INFO("Unity", "The Mortuary Assistant launcher passed CRT & security checks!");
+        LOG_INFO("Unity", "Engine parameters: hInstance=0x" + std::to_string(ctx.rcx) + 
+                          ", hPrevInstance=0x" + std::to_string(ctx.rdx) + 
+                          ", lpCmdLine=0x" + std::to_string(ctx.r8) + 
+                          ", nShowCmd=0x" + std::to_string(ctx.r9));
+        return 0; // Success
+    });
 }
 
 } // namespace Scarlett
