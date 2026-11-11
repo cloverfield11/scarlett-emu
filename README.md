@@ -505,8 +505,8 @@ Commercial games distributed through digital endpoints are delivered within encr
 ### Build Instructions:
 ```bash
 # 1. Clone the project repository
-git clone https://github.com/cloverfield11/useless-xbox-emulator.git
-cd useless-xbox-emulator
+git clone https://github.com/cloverfield11/scarlett-emu.git
+cd scarlett-emu
 
 # 2. Configure build environment with CMake
 cmake -B build -S .
