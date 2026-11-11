@@ -95,6 +95,9 @@ bool MetalRenderer::Initialize(u32 width, u32 height) {
 }
 
 bool MetalRenderer::CreateWindowAndPipeline() {
+    if (m_impl->window != nil) {
+        return true;
+    }
     @autoreleasepool {
         // 1. Initialize NSApplication
         [NSApplication sharedApplication];

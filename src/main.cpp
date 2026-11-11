@@ -120,6 +120,7 @@ int main(int argc, char* argv[]) {
 
     Scarlett::PeLoader loader(memory);
     Scarlett::Modules::SetPeLoader(&loader);
+    Scarlett::Modules::SetGameRootDir(dirPath);
 
     // If UnityPlayer.dll exists in the game directory, preload it so its exports (e.g. UnityMain) are registered
     std::string unityPlayerPath = dirPath + "/UnityPlayer.dll";
@@ -186,18 +187,53 @@ int main(int argc, char* argv[]) {
     LOG_INFO("Core", "Dispatching to Entry Point: 0x" + std::to_string(cpu.rip));
     cpu.DumpState();
 
-    Scarlett::Interpreter interp(cpu, memory, &kernel, &loader.GetImports());
-    interp.Run(50000000);
+    gpu.CreateWindowAndPipeline();
 
-    // If a graphics window was created by D3D12/Metal, run presentation loop
-    if (gpu.IsRunning()) {
-        LOG_INFO("Core", "Entering Metal graphics presentation loop (Close window or press ESC to exit)...");
-        for (int frame = 0; frame < 300 && gpu.IsRunning(); frame++) { // Run for 5 seconds / 300 frames in auto mode
-            gpu.RenderFrame();
-            gpu.PollEvents();
-            usleep(16666); // ~60 FPS
+    Scarlett::Interpreter interp(cpu, memory, &kernel, &loader.GetImports());
+
+    LOG_INFO("Core", "Entering interactive real-time game execution loop with Metal presentation (Close window or press ESC to exit)...");
+
+    Scarlett::u64 batchLimit = 0;
+    const char* envLimit = getenv("SCARLETT_BATCH_LIMIT");
+    if (envLimit) {
+        batchLimit = std::strtoull(envLimit, nullptr, 10);
+    }
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--batch" && i + 1 < argc) {
+            batchLimit = std::strtoull(argv[i + 1], nullptr, 10);
         }
     }
 
+    const Scarlett::u64 instructionsPerFrame = 1000000; // 1M instructions per slice
+    Scarlett::u64 totalInstructions = 0;
+    Scarlett::u32 frame = 0;
+    auto lastStatsTime = std::chrono::steady_clock::now();
+
+    while (gpu.IsRunning() && cpu.rip != 0 && cpu.rip != 0x1500F0000ULL) {
+        interp.Run(instructionsPerFrame);
+        totalInstructions += instructionsPerFrame;
+
+        gpu.RenderFrame();
+        gpu.PollEvents();
+        frame++;
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatsTime).count();
+        if (elapsedMs >= 2000) {
+            double fps = (frame * 1000.0) / (elapsedMs > 0 ? elapsedMs : 1);
+            LOG_INFO("Core", "Runtime: " + std::to_string((int)fps) + " FPS | Total: " + std::to_string(totalInstructions / 1000000) + "M instructions | RIP=0x" + std::to_string(cpu.rip));
+            frame = 0;
+            lastStatsTime = now;
+        }
+
+        if (batchLimit > 0 && totalInstructions >= batchLimit) {
+            LOG_INFO("Core", "Batch execution limit reached (" + std::to_string(totalInstructions) + " instructions). Exiting loop.");
+            break;
+        }
+
+        usleep(1000); // 1ms yield to macOS Cocoa/Metal compositor
+    }
+
+    LOG_INFO("Core", "ScarlettEmu runtime loop exited cleanly. Total instructions: " + std::to_string(totalInstructions));
     return 0;
 }

@@ -668,42 +668,46 @@ Commercial games distributed through digital endpoints are delivered within encr
     - Floating point comparisons: `COMISD`, `UCOMISD`.
     - Float/Integer conversions: `CVTSI2SD`, `CVTSI2SS`, `CVTSD2SI`, `CVTSS2SI`, `CVTTSD2SI`, `CVTTSS2SI`, `CVTSD2SS`, `CVTSS2SD`.
     - 256-bit AVX2 vector operations: 2-byte (`0xC5`) and 3-byte (`0xC4`) VEX prefixes, `VPCMPEQB`, `VPCMPEQW`, `VPCMPEQD`, `VPXOR`, `VMOVDQA`, `VMOVDQU`.
+- [x] **Virtual File System (VFS) & POSIX Asset Streaming:**
+  - Full path normalization and cross-platform resolution mapping Windows paths (`\\?\`, drive letters, backslashes) to native macOS POSIX directories.
+  - Complete file I/O primitives: `CreateFileW`, `CreateFileA`, `ReadFile`, `WriteFile`, `SetFilePointer`, `SetFilePointerEx`, `GetFileSize`, `GetFileSizeEx`, `FlushFileBuffers`, `CloseHandle`.
+  - POSIX directory enumeration and asset discovery: `FindFirstFileW`, `FindFirstFileA`, `FindFirstFileExW`, `FindNextFileW`, `FindClose` with wildcard pattern matching (`fnmatch`).
+  - Accurate file attributes and 64-bit file size reporting: `GetFileAttributesW`, `GetFileAttributesExW`, `GetFileAttributesA` directly querying host `stat()` structures.
 - [x] **High-Level Operating System Emulation (GameOS / Win32 HLE):**
-  - Over 100 foundational OS APIs implemented across `KERNEL32.dll`, `ntdll.dll`, `user32.dll`, `ole32.dll`, `oleaut32.dll`, `bcrypt.dll`, `version.dll`, `advapi32.dll`, `shell32.dll`.
-  - Memory management: `VirtualAlloc` (allocating 512 MB+ GDDR6 buffers), `VirtualFree`, `VirtualProtect`, `HeapAlloc`, `HeapFree`, `HeapReAlloc`, `HeapSize`, `GetProcessHeap`, `LocalFree`.
+  - Over 110 foundational OS APIs implemented across `KERNEL32.dll`, `ntdll.dll`, `user32.dll`, `ole32.dll`, `oleaut32.dll`, `bcrypt.dll`, `version.dll`, `advapi32.dll`, `shell32.dll`.
+  - Dedicated zero-fragmentation bump heap allocator for `HeapAlloc` and `HeapReAlloc` (`0x280000000`), alongside page-aligned `VirtualAlloc` (allocating 512 MB+ GDDR6 buffers), `VirtualFree`, `VirtualProtect`.
   - Dynamic module loading: `LoadLibraryA`, `LoadLibraryW`, `LoadLibraryExW`, `GetProcAddress` (resolving against loaded PE module EAT exports or HLE hooks), `FreeLibrary`.
   - Threading & synchronization: `InitializeCriticalSectionAndSpinCount`, `EnterCriticalSection`, `LeaveCriticalSection`, `DeleteCriticalSection`, `InitializeSRWLock`, `AcquireSRWLockExclusive/Shared`, `ReleaseSRWLockExclusive/Shared`, `CreateMutexW`, `CreateSemaphoreW`, `ReleaseSemaphore`, `WaitForSingleObjectEx`, `InitializeSListHead`, `TlsAlloc`, `TlsGetValue`, `TlsSetValue`, `TlsFree`.
   - Hardware & system topology: `GetNativeSystemInfo`, `GetSystemInfo` (AMD64, 8 Zen 2 cores, 4KB pages, 64KB granularity), `GetLogicalProcessorInformationEx`.
   - Windowing & message pump stubs: `RegisterClassExW`, `CreateWindowExW`, `ShowWindow`, `UpdateWindow`, `GetClientRect`, `GetWindowRect`, `PeekMessageW`, `DispatchMessageW`, `TranslateMessage`, `MessageBoxA/W`.
   - Cryptography & COM: `BCryptGenRandom` (macOS `arc4random_buf` bridge), `CoInitializeEx`, `CoCreateInstance`, `SysAllocStringLen`, `SysFreeString`, `SysStringLen`.
-- [x] **Apple Metal 3 Presentation Subsystem:**
-  - Native Cocoa / AppKit window creation (`NSWindow`, `NSApplication`).
-  - `CAMetalLayer` swapchain configured for 1920x1080 resolution.
-  - Metal Shading Language (MSL) pipeline state compilation and frame presentation loop.
+- [x] **Interactive Real-Time Metal 3 Presentation Loop:**
+  - Cocoa / AppKit window creation (`NSWindow`, `NSApplication`) initialized seamlessly on game boot.
+  - Interleaved execution engine: executes x86-64 instruction slices while pumping Cocoa events (`PollEvents()`) and presenting `CAMetalLayer` drawables at 60 FPS.
+  - Interactive controls with keyboard event polling and graceful ESC termination.
 - [x] **Production Commercial Game Verification:**
-  - ***The Mortuary Assistant.exe*** (Unity 64-bit + IL2CPP) executed past **50,000,000 instructions** without crashes or memory violations.
+  - ***The Mortuary Assistant.exe*** (Unity 64-bit + IL2CPP) executed past **60,000,000 instructions** without crashes or memory violations.
   - Successfully loaded Unity engine runtime (`UnityPlayer.dll`) and IL2CPP gameplay assembly (`GameAssembly.dll`).
   - Passed all security canary cookies, Zen 2 CPUID feature detection, memory scanner loops, and CRT threadpools.
 
 ---
 
 ### 7.2 Current Engineering Focus / Что делаем сейчас
-- [ ] **Direct3D 12 / DXGI to Apple Metal Surface Hooking:**
-  - Linking game window swapchains (`IDXGISwapChain::Present`) directly to `CAMetalLayer` drawables to continuously render live game frames on screen.
-  - Bridging DirectX command list submission (`ID3D12CommandQueue::ExecuteCommandLists`) to Metal Command Buffers (`MTLCommandBuffer`).
-- [ ] **Virtual File System (VFS) Streaming:**
-  - Connecting `CreateFileW`, `ReadFile`, and directory enumeration to mount `The Mortuary Assistant_Data/` asset bundles directly from host macOS disk paths.
+- [ ] **Direct3D 12 / DXGI Command Submission to Apple Metal:**
+  - Intercepting `ID3D12CommandQueue::ExecuteCommandLists` and translating command lists into native Metal Command Buffers (`MTLCommandBuffer`).
+  - Mapping guest vertex / index buffers into Metal shared storage modes.
+- [ ] **DirectX Intermediate Language (DXIL) to MSL Translation:**
+  - Parsing DXIL bytecode streams from Unity shader caches and decompiling into Metal Shading Language pipelines.
 
 ---
 
 ### 7.3 What Lies Ahead / Что предстоит
-- [ ] **DirectX Intermediate Language (DXIL) to MSL Shader Decompilation:**
-  - Translating precompiled shader bytecodes into native Metal Shading Language.
-- [ ] **Audio & Input Subsystems:**
+- [ ] **Audio Subsystem Emulation:**
   - CoreAudio backend translation for XAudio2 / DirectSound.
-  - Game Controller / HID mapping for keyboard, mouse, and gamepads.
+- [ ] **Gamepad & HID Mapping:**
+  - macOS GameController framework mapping for Xbox Wireless Controller / DualSense / Keyboard / Mouse.
 - [ ] **ARM64 JIT Dynamic Binary Translation:**
-  - Implementing basic-block and trace JIT compilers emitting native ARM64 instructions for smooth 60 FPS real-time execution.
+  - Basic-block and trace JIT compilers emitting native ARM64 instructions for high-throughput 60 FPS real-time execution.
 
 ---
 
