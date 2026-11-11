@@ -9,6 +9,7 @@
 #include "gpu/metal_renderer.h"
 #include <iostream>
 #include <vector>
+#include <unistd.h>
 
 void PrintBanner() {
     std::cout << "\033[1;32m"
@@ -119,6 +120,16 @@ int main(int argc, char* argv[]) {
 
     Scarlett::Interpreter interp(cpu, memory, &kernel, &loader.GetImports());
     interp.Run();
+
+    // If a graphics window was created by D3D12/Metal, run presentation loop
+    if (gpu.IsRunning()) {
+        LOG_INFO("Core", "Entering Metal graphics presentation loop (Close window or press ESC to exit)...");
+        for (int frame = 0; frame < 300 && gpu.IsRunning(); frame++) { // Run for 5 seconds / 300 frames in auto mode
+            gpu.RenderFrame();
+            gpu.PollEvents();
+            usleep(16666); // ~60 FPS
+        }
+    }
 
     return 0;
 }

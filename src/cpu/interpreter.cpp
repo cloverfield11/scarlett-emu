@@ -35,6 +35,11 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     bool rexW = false;
     u8 rexR = 0, rexB = 0;
 
+    // Skip prefixes: 0x66 (operand size), 0x2E (CS override / branch hint), 0xF0 (LOCK), 0xF2/0xF3 (REP)
+    while (offset < 15 && (code[offset] == 0x66 || code[offset] == 0x2E || code[offset] == 0xF0 || code[offset] == 0xF2 || code[offset] == 0xF3)) {
+        offset++;
+    }
+
     // Check for REX prefix (0x40 - 0x4F)
     if ((code[offset] & 0xF0) == 0x40) {
         u8 rex = code[offset++];
@@ -48,6 +53,20 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     // 0x90: NOP
     if (opcode == 0x90) {
         inst.type = OpcodeType::Unknown;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0x1F: Multi-byte NOP (NOP r/m)
+    if (opcode == 0x0F && code[offset] == 0x1F) {
+        offset++;
+        u8 modrm = code[offset++];
+        u8 mod = (modrm >> 6) & 0x03;
+        u8 rm = modrm & 0x07;
+        if (rm == 4) offset++; // SIB byte
+        if (mod == 1) offset += 1;
+        else if (mod == 2) offset += 4;
+        inst.type = OpcodeType::Unknown; // treat as NOP
         inst.length = offset;
         return inst;
     }

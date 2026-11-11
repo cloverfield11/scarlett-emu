@@ -1,4 +1,5 @@
 #include "kernel/modules/d3d12_x.h"
+#include "gpu/metal_renderer.h"
 #include "common/logging.h"
 
 namespace Scarlett::Modules {
@@ -12,6 +13,15 @@ void RegisterD3D12X(HleKernel& kernel) {
         GuestAddr ppDevice = ctx.r9;
 
         LOG_INFO("D3D12X", "D3D12CreateDevice called! Requested Feature Level: 0x" + std::to_string(featureLevel));
+
+        // Connect and activate the Metal GPU rendering window on macOS
+        MetalRenderer* renderer = GetMetalRenderer();
+        if (renderer) {
+            renderer->CreateWindowAndPipeline();
+            // Render initial boot frame
+            renderer->RenderFrame();
+            renderer->PollEvents();
+        }
 
         // Return a mock D3D12 Device interface handle
         if (ppDevice) {
