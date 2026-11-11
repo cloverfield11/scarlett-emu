@@ -35,10 +35,20 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     bool rexW = false;
     u8 rexR = 0, rexB = 0;
 
-    // Skip prefixes: 0x66 (operand size), 0x2E (CS override / branch hint), 0xF0 (LOCK), 0xF2/0xF3 (REP)
-    while (offset < 15 && (code[offset] == 0x66 || code[offset] == 0x2E || code[offset] == 0xF0 || code[offset] == 0xF2 || code[offset] == 0xF3)) {
-        offset++;
+    bool isGs = false;
+    // Skip prefixes: 0x65 (GS segment), 0x66 (operand size), 0x2E (CS override / branch hint), 0xF0 (LOCK), 0xF2/0xF3 (REP)
+    while (offset < 15) {
+        u8 p = code[offset];
+        if (p == 0x65) {
+            isGs = true;
+            offset++;
+        } else if (p == 0x66 || p == 0x2E || p == 0xF0 || p == 0xF2 || p == 0xF3) {
+            offset++;
+        } else {
+            break;
+        }
     }
+    inst.isGsRelative = isGs;
 
     // Check for REX prefix (0x40 - 0x4F)
     if ((code[offset] & 0xF0) == 0x40) {
@@ -222,11 +232,93 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     }
 
     // 0x8B: MOV r64, r/m64
-    if (rexW && opcode == 0x8B) {
+    if (opcode == 0x8B) {
         u8 modrm = code[offset++];
         inst.type = OpcodeType::Mov;
         inst.regDest = ((modrm >> 3) & 0x07) | rexR;
         inst.regSrc = (modrm & 0x07) | rexB;
+
+        // Check for GS:[disp32] (e.g. mov rax, gs:[0x30])
+        if (inst.isGsRelative && (modrm & 0xC7) == 0x04 && code[offset] == 0x25) {
+            offset++; // skip SIB 0x25
+            inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+            offset += 4;
+        } else if ((modrm & 0xC0) == 0x40) { // [reg + disp8]
+            inst.displacement = static_cast<s8>(code[offset++]);
+        } else if ((modrm & 0xC0) == 0x80) { // [reg + disp32]
+            inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+            offset += 4;
+        }
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x88: MOV r/m8, r8
+    if (opcode == 0x88) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Mov;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
+        inst.isMemoryStore = true;
+        if ((modrm & 0xC7) == 0x05) { // [rip + disp32]
+            inst.isRipRelative = true;
+            inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+            offset += 4;
+        }
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0xB6: MOVZX r32/r64, r/m8
+    if (opcode == 0x0F && code[offset] == 0xB6) {
+        offset++;
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Movzx;
+        inst.regDest = ((modrm >> 3) & 0x07) | rexR;
+        inst.regSrc = (modrm & 0x07) | rexB;
+        if ((modrm & 0xC7) == 0x05) { // [rip + disp32]
+            inst.isRipRelative = true;
+            inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+            offset += 4;
+        }
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0x40 - 0x4F: CMOVcc
+    if (opcode == 0x0F && (code[offset] >= 0x40 && code[offset] <= 0x4F)) {
+        u8 cc = code[offset++] & 0x0F;
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Cmov;
+        inst.conditionCode = cc;
+        inst.regDest = ((modrm >> 3) & 0x07) | rexR;
+        inst.regSrc = (modrm & 0x07) | rexB;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x0F 0xB1: CMPXCHG r/m64, r64
+    if (opcode == 0x0F && code[offset] == 0xB1) {
+        offset++;
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Cmpxchg;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
+        if ((modrm & 0xC7) == 0x05) { // [rip + disp32]
+            inst.isRipRelative = true;
+            inst.displacement = *reinterpret_cast<const s32*>(code + offset);
+            offset += 4;
+        }
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0x38 / 0x39 / 0x3B: CMP
+    if (opcode == 0x38 || opcode == 0x39 || opcode == 0x3B) {
+        u8 modrm = code[offset++];
+        inst.type = OpcodeType::Cmp;
+        inst.regDest = (modrm & 0x07) | rexB;
+        inst.regSrc = ((modrm >> 3) & 0x07) | rexR;
         inst.length = offset;
         return inst;
     }
@@ -318,16 +410,72 @@ bool Interpreter::Step() {
 
         case OpcodeType::Mov: {
             u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
-            if (inst.isMemoryStore) {
-                if (dst) {
+            if (inst.isGsRelative) {
+                GuestAddr srcAddr = m_ctx.gsBase + inst.displacement;
+                if (dst) *dst = m_memory.Read<u64>(srcAddr);
+            } else if (inst.isMemoryStore) {
+                if (inst.isRipRelative) {
+                    GuestAddr targetAddr = currentRip + inst.length + inst.displacement;
+                    m_memory.Write<u8>(targetAddr, static_cast<u8>(m_ctx.rax & 0xFF));
+                } else if (dst) {
                     GuestAddr targetAddr = *dst + inst.displacement;
                     m_memory.Write<u32>(targetAddr, static_cast<u32>(inst.immediate));
+                }
+            } else if (inst.displacement != 0) {
+                u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+                if (src && dst) {
+                    GuestAddr srcAddr = *src + inst.displacement;
+                    *dst = m_memory.Read<u64>(srcAddr);
                 }
             } else if (inst.hasImmediate) {
                 if (dst) *dst = inst.immediate;
             } else {
                 u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
                 if (dst && src) *dst = *src;
+            }
+            break;
+        }
+
+        case OpcodeType::Movzx: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            GuestAddr srcAddr = inst.isRipRelative ? (currentRip + inst.length + inst.displacement) : 0;
+            u8 val = m_memory.Read<u8>(srcAddr);
+            if (dst) *dst = static_cast<u64>(val);
+            break;
+        }
+
+        case OpcodeType::Cmov: {
+            bool condMet = false;
+            if (inst.conditionCode == 4) condMet = (m_ctx.rflags & 0x40) != 0; // CMOVE (ZF == 1)
+            else if (inst.conditionCode == 5) condMet = (m_ctx.rflags & 0x40) == 0; // CMOVNE (ZF == 0)
+            if (condMet) {
+                u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+                u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+                if (dst && src) *dst = *src;
+            }
+            break;
+        }
+
+        case OpcodeType::Cmpxchg: {
+            GuestAddr memAddr = inst.isRipRelative ? (currentRip + inst.length + inst.displacement) : 0;
+            u64 val = m_memory.Read<u64>(memAddr);
+            u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+            if (m_ctx.rax == val) {
+                m_ctx.rflags |= 0x40; // ZF = 1
+                if (src) m_memory.Write<u64>(memAddr, *src);
+            } else {
+                m_ctx.rflags &= ~0x40; // ZF = 0
+                m_ctx.rax = val;
+            }
+            break;
+        }
+
+        case OpcodeType::Cmp: {
+            u64* dst = GetRegisterPtr(m_ctx, inst.regDest);
+            u64* src = GetRegisterPtr(m_ctx, inst.regSrc);
+            if (dst && src) {
+                if (*dst == *src) m_ctx.rflags |= 0x40;
+                else m_ctx.rflags &= ~0x40;
             }
             break;
         }

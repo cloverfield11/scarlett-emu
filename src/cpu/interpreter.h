@@ -13,11 +13,14 @@ constexpr u16 HLE_TRAP_OPCODE = 0x0B0F; // UD2 opcode (0x0F, 0x0B)
 enum class OpcodeType {
     Unknown,
     Mov,
+    Movzx,
     Add,
     Sub,
     Xor,
     Test,
     Cmp,
+    Cmpxchg,
+    Cmov,
     Jmp,
     Je,
     Jne,
@@ -40,6 +43,8 @@ struct DecodedInstruction {
     bool hasImmediate{false};
     bool isRipRelative{false};
     bool isMemoryStore{false};
+    bool isGsRelative{false};
+    u8 conditionCode{0};
 };
 
 class X86Decoder {

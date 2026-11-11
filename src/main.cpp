@@ -7,6 +7,7 @@
 #include "loader/package_manifest.h"
 #include "kernel/hle_kernel.h"
 #include "gpu/metal_renderer.h"
+#include "cpu/teb.h"
 #include <iostream>
 #include <vector>
 #include <unistd.h>
@@ -126,6 +127,7 @@ int main(int argc, char* argv[]) {
     Scarlett::CpuContext cpu;
     cpu.rip = loader.GetEntryPoint();
     cpu.rsp = Scarlett::GUEST_MEMORY_BASE + 0x800000;
+    cpu.gsBase = Scarlett::EnvironmentManager::InitializeTebPeb(memory, loader.GetImageBase());
 
     LOG_INFO("Core", "Dispatching to Entry Point: 0x" + std::to_string(cpu.rip));
     cpu.DumpState();

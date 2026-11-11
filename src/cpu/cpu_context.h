@@ -26,6 +26,7 @@ struct alignas(16) CpuContext {
 
     u64 rip{0};    // Instruction Pointer
     u64 rflags{0}; // Processor Flags
+    u64 gsBase{0}; // GS Segment Base (Points to TEB in Windows x64)
 
     // AVX2 / YMM registers (256-bit SIMD registers)
     struct YmmReg {
