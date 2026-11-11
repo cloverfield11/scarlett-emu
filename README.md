@@ -48,10 +48,10 @@ This whitepaper details the architectural design, formal mathematical and system
 6. [Security Architecture & Cryptographic Boundaries](#6-security-architecture--cryptographic-boundaries)
    - [6.1 The AMD Platform Security Processor (PSP)](#61-the-amd-platform-security-processor-psp)
    - [6.2 The MSIXVC Container Encryption Hierarchy](#62-the-msixvc-container-encryption-hierarchy)
-7. [Project Status & Roadmap (Текущий статус и дорожная карта)](#7-project-status--roadmap-текущий-статус-и-дорожная-карта)
-   - [7.1 What Has Been Accomplished / Что сделано](#71-what-has-been-accomplished--что-сделано)
-   - [7.2 Current Engineering Focus / Что делаем сейчас](#72-current-engineering-focus--что-делаем-сейчас)
-   - [7.3 What Lies Ahead / Что предстоит](#73-what-lies-ahead--что-предстоит)
+7. [Project Status & Roadmap](#7-project-status--roadmap)
+   - [7.1 What Has Been Accomplished](#71-what-has-been-accomplished)
+   - [7.2 Current Engineering Focus](#72-current-engineering-focus)
+   - [7.3 What Lies Ahead](#73-what-lies-ahead)
 8. [Future Research Directions](#8-future-research-directions)
 9. [Building & Running](#9-building--running)
 10. [License](#10-license)
@@ -641,14 +641,14 @@ Commercial games distributed through digital endpoints are delivered within encr
 
 ---
 
-## 7. Project Status & Roadmap (Текущий статус и дорожная карта)
+## 7. Project Status & Roadmap
 
-> **Статус:** На паузе (последняя веха — **12,000,124,660+ инструкций** без сбоев на *The Mortuary Assistant*, многопоточная синхронизация `CRITICAL_SECTION`/`SRWLOCK` и 128 GB виртуальная арена с возвратом страниц ОС).
+> **Project State:** Paused at **12,000,124,660+ executed instructions** on *The Mortuary Assistant* with zero crashes, full blocking `CRITICAL_SECTION`/`SRWLOCK` synchronization, and a 128 GB free-list virtual memory arena with OS page reclamation.
 
-### 7.1 What Has Been Accomplished / Что сделано
+### 7.1 What Has Been Accomplished
 - [x] **128 GB Unified Memory Arena & Free-List Allocator (`MemoryManager`):**
-  - Виртуальное адресное пространство расширено до **128 GB** (`0x2000000000ULL`) для крупных резерваций Unity / IL2CPP VM.
-  - Реализован first-fit free-list с коалесцингом свободных интервалов, переиспользованием блоков, исправлением `GetCurrentAllocTop()` и возвратом физических страниц ОС (`mmap(..., MAP_FIXED)`) при `VirtualFree(MEM_RELEASE)`.
+  - Expanded the virtual address arena to **128 GB** (`0x2000000000ULL`) to accommodate large Unity and IL2CPP VM reservations.
+  - Implemented first-fit free-list interval reuse, adjacent block coalescing, fixed `GetCurrentAllocTop()` accounting, and physical host page reclamation (`mmap(..., MAP_FIXED)`) on `VirtualFree(MEM_RELEASE)`.
 - [x] **PE32+ Multi-Module Loader & Base Relocations (`.reloc`):**
   - Automated parsing of 64-bit Windows/GameOS PE32+ executables and dynamic link libraries.
   - Conflict-free virtual address mapping with base relocation engine (`IMAGE_REL_BASED_DIR64` and `IMAGE_REL_BASED_HIGHLOW`) supporting simultaneous loading of modules sharing the same default image base (`0x180000000`).
@@ -661,33 +661,33 @@ Commercial games distributed through digital endpoints are delivered within encr
 - [x] **Virtual File System (VFS) & POSIX Asset Streaming:**
   - Full Windows-to-macOS POSIX path normalization (`\\?\`, drive letters, backslashes), file I/O (`CreateFileW/A`, `ReadFile`, `WriteFile`, `SetFilePointer*`, `GetFileSize*`), directory enumeration (`FindFirstFile*`, `FindNextFileW`), and `stat()` attributes.
 - [x] **Cooperative Multithreading & Real Synchronization (`kernel32` HLE):**
-  - Кооперативный round-robin планировщик для 130+ гостевых потоков с виртуальным временем (`s_virtualMsOffset`), эпохами пробуждения (`s_syncSignalEpoch`), обработкой `WaitForSingleObjectEx`, `WaitForMultipleObjects`, `WakeConditionVariable`, `WakeAllConditionVariable`.
-  - Полноценная взаимная блокировка **`CRITICAL_SECTION`** и **`SRWLOCK`** (`EnterCriticalSection`, `LeaveCriticalSection`, `TryEnterCriticalSection`, `DeleteCriticalSection`, `AcquireSRWLockExclusive/Shared`, `ReleaseSRWLockExclusive/Shared`, `TryAcquireSRWLockExclusive/Shared`, `SleepConditionVariableCS`, `SleepConditionVariableSRW`), устранившая гонку двух активных потоков внутри `tlsf`-аллокатора Unity (`DynamicHeapAllocator`).
-  - Полная поддержка `VirtualQuery`, `VirtualAlloc`/`VirtualFree`, `HeapAlloc`/`HeapReAlloc`/`HeapFree`, `Tls*`/`Fls*`, а также 110+ базовых Win32/GameOS API.
+  - Cooperative round-robin scheduler handling 130+ guest threads with virtual clock advancement (`s_virtualMsOffset`), epoch-based wakeups (`s_syncSignalEpoch`), `WaitForSingleObjectEx`, `WaitForMultipleObjects`, `WakeConditionVariable`, and `WakeAllConditionVariable`.
+  - Blocking mutual-exclusion primitives for **`CRITICAL_SECTION`** and **`SRWLOCK`** (`EnterCriticalSection`, `LeaveCriticalSection`, `TryEnterCriticalSection`, `DeleteCriticalSection`, `AcquireSRWLockExclusive/Shared`, `ReleaseSRWLockExclusive/Shared`, `TryAcquireSRWLockExclusive/Shared`, `SleepConditionVariableCS`, `SleepConditionVariableSRW`), resolving multi-thread heap corruption inside Unity's `tlsf` `DynamicHeapAllocator`.
+  - Complete region tracking for `VirtualQuery`, `VirtualAlloc`/`VirtualFree`, `HeapAlloc`/`HeapReAlloc`/`HeapFree`, `Tls*`/`Fls*`, and 110+ foundational Win32/GameOS APIs.
 - [x] **D3D11 / DXGI / D3D12.X COM HLE & Metal 3 Presentation Loop:**
-  - Прокси COM-интерфейсов `ID3D11Device`, `ID3D11DeviceContext`, `IDXGISwapChain`, `IDXGIFactory`, `ID3D11Texture2D`, `ID3D11Buffer`, `ID3D11RenderTargetView`, `ID3D11ShaderResourceView`, и др.
-  - Проброс `ClearRenderTargetView` и backbuffer в `MetalRenderer` (`SetGameFrameActive`, `SetClearColor`, `SubmitFramebufferRGBA8`), интерактивное окно AppKit/Metal и headless-режим `--batch <N>`.
+  - COM interface proxies for `ID3D11Device`, `ID3D11DeviceContext`, `IDXGISwapChain`, `IDXGIFactory`, `ID3D11Texture2D`, `ID3D11Buffer`, `ID3D11RenderTargetView`, `ID3D11ShaderResourceView`, and related pipeline state objects.
+  - `ClearRenderTargetView` and backbuffer forwarding to `MetalRenderer` (`SetGameFrameActive`, `SetClearColor`, `SubmitFramebufferRGBA8`), interactive AppKit/Metal window presentation loop, and headless `--batch <N>` execution mode.
 - [x] **Production Commercial Game Verification (*The Mortuary Assistant*, Unity + IL2CPP):**
-  - Пройдено **12,000,124,660+ инструкций** (12+ млрд) в режиме `--batch` без сбоев и нехватки адресного пространства.
-  - Загружены основные ресурсы и ассеты сцены (`level0`, `sharedassets0.assets`, `sharedassets0.assets.resS`, `sharedassets0.resource`, `il2cpp_data/Resources/mscorlib.dll-resources.dat`), выполнены первые вызовы `IDXGISwapChain::Present` и `DrawIndexed`.
+  - Executed **12,000,124,660+ instructions** cleanly in `--batch` mode with zero faults or arena exhaustion.
+  - Loaded core scene and runtime assets (`level0`, `sharedassets0.assets`, `sharedassets0.assets.resS`, `sharedassets0.resource`, `il2cpp_data/Resources/mscorlib.dll-resources.dat`), reaching initial `IDXGISwapChain::Present` and `DrawIndexed` calls.
 
 ---
 
-### 7.2 Current Engineering Focus / Что делаем сейчас
-> Проект поставлен на паузу на следующем этапе перед выводом реальных игровых кадров в окно Metal:
-- [ ] **Проброс D3D11 draw-вызовов и текстур в `MetalRenderer`:**
-  - Движок Unity уже создаёт SwapChain и доходит до `ClearRenderTargetView` и первых `DrawIndexed` вызовов, но привязываемые текстуры (`PSSetShaderResources`, `UpdateSubresource` / `Map`) и геометрия ещё не рендерятся поверх backbuffer'а.
-  - Следующий шаг при возобновлении работы — захват и отрисовка текстур/квадов из `ID3D11DeviceContext` в `MetalRenderer`, чтобы заменить стартовый треугольник реальными кадрами игры.
+### 7.2 Current Engineering Focus
+> Work is paused right before translating D3D11 draw calls and textures into live Metal game frames:
+- [ ] **D3D11 Draw Call & Texture Forwarding to `MetalRenderer`:**
+  - Unity initializes the SwapChain and issues `ClearRenderTargetView` and initial `DrawIndexed` calls, while bound shader resources (`PSSetShaderResources`, `UpdateSubresource` / `Map`) and geometry are not yet rasterized onto the backbuffer.
+  - Next milestone upon resuming: capture bound textures, vertex/index buffers, and quad draws from `ID3D11DeviceContext` into `MetalRenderer` to render real splash/UI/scene frames instead of the placeholder triangle and clear colors.
 
 ---
 
-### 7.3 What Lies Ahead / Что предстоит
-- [ ] **Полноценный D3D11/D3D12 -> Metal пайплайн и трансляция шейдеров (DXBC/DXIL -> MSL):**
-  - Захват вершинных/индексных буферов, текстурных форматов (RGBA8/BGRA8/BCn) и декомпиляция байткода шейдеров в Metal Shading Language.
+### 7.3 What Lies Ahead
+- [ ] **Full D3D11/D3D12 to Metal Pipeline & Shader Translation (DXBC/DXIL -> MSL):**
+  - Vertex/index buffer binding, texture format decoding (RGBA8/BGRA8/BCn), and bytecode translation to Metal Shading Language pipelines.
 - [ ] **ARM64 JIT Dynamic Binary Translation:**
-  - Переход со скалярного интерпретатора (~120–130M инстр/сек) на JIT-компилятор в нативный ARM64 (`pthread_jit_write_protect`) для быстрого запуска тяжёлых Unity-сцен в реальном времени.
+  - Replacing the scalar interpreter (~120–130M instructions/sec) with an optimizing ARM64 JIT compiler (`pthread_jit_write_protect`) for real-time scene loading and gameplay framerates.
 - [ ] **Audio & Input Subsystems:**
-  - CoreAudio бэкенд для XAudio2 / FMOD / DirectSound и маппинг геймпадов/клавиатуры/мыши через GameController / Cocoa.
+  - CoreAudio backend for XAudio2 / FMOD / DirectSound and macOS GameController / Cocoa keyboard and mouse input mapping.
 
 ---
 
