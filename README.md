@@ -556,30 +556,33 @@ Prior to invoking engine code, the MSVC runtime executes rigorous validation seq
 3. Vectorized Memory Zeroing (`memset`): Dispatches vectorized SSE2 initialization sequences (`movq`, `punpcklbw` byte duplication, and aligned 16-byte `movaps`/`movups` stores).
 4. Environment & Command-Line Setup: Ingests `GetCommandLineW` and `GetStartupInfoW` buffers.
 
-#### 3. Execution Verification Trace (1,000,000+ Instructions)
-The guest successfully traverses CRT startup and branches cleanly into the engine entry point `UnityPlayer.dll!UnityMain`:
+#### 3. Execution Verification Trace (50,000,000+ Instructions Across Unity & IL2CPP)
+The guest successfully traverses CRT startup, initializes the engine runtime `UnityPlayer.dll`, dynamically loads and relocates the 45 MB `GameAssembly.dll` (IL2CPP) and `baselib.dll`, and smoothly processes 50,000,000+ instructions:
 
 ```text
+[INFO] [Core] Starting ScarlettEmu subsystems on macOS ARM64...
+[INFO] [Memory] Unified GDDR6 Virtual Memory initialized: 10 GB allocated at host address 0x7000000000
+[INFO] [GPU] Metal Hardware initialized: Apple M5
+[INFO] [GPU] Target Render Surface: 1920x1080
+[INFO] [Kernel] Initializing Xbox GameOS HLE subsystem...
+[INFO] [Core] Found Unity Engine runtime library: The Mortuary Assistant/UnityPlayer.dll
+[INFO] [Loader] Module 'UnityPlayer.dll' successfully loaded at 0x180000000
+[INFO] [Core] Found baselib library: The Mortuary Assistant/baselib.dll
+[INFO] [Loader] Module 'baselib.dll' conflicts with loaded module. Relocating to 0x200000000
+[INFO] [Loader] Applying base relocations for 'baselib.dll' (delta: 2147483648)...
+[INFO] [Core] Found GameAssembly runtime (IL2CPP): The Mortuary Assistant/GameAssembly.dll
+[INFO] [Loader] Module 'GameAssembly.dll' conflicts with loaded module. Relocating to 0x201000000
+[INFO] [Loader] Applying base relocations for 'GameAssembly.dll' (delta: 2147483648)...
+[INFO] [Loader] Successfully resolved 4,498 exports for 'GameAssembly.dll'
+[INFO] [Core] Executing DllMain (DLL_PROCESS_ATTACH) for 'UnityPlayer.dll' at 0x180fc115a...
 [INFO] [Interpreter] Entering x86-64 Zen 2 execution loop...
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2000000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2010000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x165000000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2020000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2030000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2040000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2050000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2060000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2070000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2080000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x2090000
-[DEBUG] [Memory] Allocated 0x10000 bytes at GuestAddr 0x20a0000
-[INFO] [Unity] ============================================================
-[INFO] [Unity]   🚀 SUCCESS: UnityPlayer.dll!UnityMain EXECUTION REACHED!   
-[INFO] [Unity] ============================================================
-[INFO] [Unity] The Mortuary Assistant launcher passed CRT & security checks!
-[INFO] [Unity] Engine parameters: hInstance=0x5368709120, hPrevInstance=0x0, lpCmdLine=0x5989470264, nShowCmd=0x10
-[INFO] [Kernel32] Game requested ExitProcess with code: 0
-[INFO] [Interpreter] Execution finished: 1000000 instructions executed. (RIP=0x1daad8)
+[INFO] [Core] DllMain for 'UnityPlayer.dll' completed successfully. (Result RAX=268436112)
+[INFO] [Core] Dispatching to Entry Point: 0x140001260
+[INFO] [Interpreter] Entering x86-64 Zen 2 execution loop...
+[DEBUG] [Kernel32] VirtualAlloc: Size=0x536866816 -> 0x572456960 (512 MB GDDR6)
+[INFO] [Kernel32] LoadLibrary requested for: 'GameAssembly.dll' -> Found relocated module at 0x201000000
+[INFO] [Kernel32] GetProcAddress: Resolved 'il2cpp_init' in 'GameAssembly.dll' -> 0x201026040
+[INFO] [Interpreter] Execution finished: 50000000 instructions executed. (RIP=0x1815f0622)
 [INFO] [Core] Entering Metal graphics presentation loop (Close window or press ESC to exit)...
 ```
 
@@ -641,68 +644,66 @@ Commercial games distributed through digital endpoints are delivered within encr
 
 ### 7.1 What Has Been Accomplished / Что сделано
 - [x] **Unified Memory Architecture (UMA):** 10 GB GDDR6 virtualized address space allocated with POSIX 64 KB page-allocation granularities and host-to-guest pointer translation.
-- [x] **PE32+ Binary Loader & Dynamic Relocation:** Automated parsing of 64-bit Windows/GameOS executables, section alignment, recursive IAT traversal, and trampoline generation.
+- [x] **PE32+ Multi-Module Loader & Base Relocations (`.reloc`):**
+  - Automated parsing of 64-bit Windows/GameOS PE32+ executables and dynamic link libraries.
+  - Conflict-free virtual address mapping with base relocation engine (`IMAGE_REL_BASED_DIR64` and `IMAGE_REL_BASED_HIGHLOW`) supporting simultaneous loading of modules sharing the same default image base (`0x180000000`).
+  - Preloading and dynamic linking of **UnityPlayer.dll** (28.4 MB), **baselib.dll** (386 KB), and **GameAssembly.dll** (45 MB IL2CPP runtime, 4,498 exports).
+  - Clean dispatch and execution of DLL initialization (`DllMain` with `DLL_PROCESS_ATTACH`) for loaded engine libraries.
 - [x] **Comprehensive x86-64 AMD Zen 2 CPU Interpreter:**
   - Full ModR/M and SIB decoding supporting all 16 general-purpose registers, REX prefixes (REX.W/R/X/B), RIP-relative displacement, and GS-relative TEB/PEB segment addressing.
-  - Complete arithmetic & logic operations: `MOV`, `MOVZX`, `MOVSXD`, `MOVSX`, `LEA`, `ADD`, `ADC`, `SUB`, `SBB`, `AND`, `OR`, `XOR`, `NOT`, `NEG`, `SHL`, `SHR`, `SAR`, `ROL`, `ROR`, `MUL`, `IMUL`, `DIV`, `IDIV`, `INC`, `DEC`, `CMP`, `TEST`.
-  - Atomic & exchange primitives: `XCHG`, `XADD`, `CMPXCHG`, `LOCK` prefix handling.
-  - Bit-test manipulation: `BT`, `BTS`, `BTR`, `BTC`, `BSWAP`.
+  - Complete arithmetic & logic operations: `MOV`, `MOVZX`, `MOVSXD`, `MOVSX`, `LEA`, `ADD`, `ADC`, `SUB`, `SBB`, `AND`, `OR`, `XOR`, `NOT`, `NEG`, `SHL`, `SHR`, `SAR`, `ROL`, `ROR`, `MUL`, `IMUL` (including 3-operand immediate forms `0x69/0x6B`), `DIV`, `IDIV`, `INC` / `DEC` (preserving CF flags), `CMP`, `TEST`.
+  - Atomic & exchange primitives: `XCHG`, `XADD`, `CMPXCHG`, `CMPXCHG8B`, `CMPXCHG16B` (for lock-free SLIST free-lists), `LOCK` prefix handling.
+  - Bit-test manipulation: `BT`, `BTS`, `BTR`, `BTC`, `BSF` (TZCNT), `BSR` (LZCNT), `POPCNT`, `BSWAP`.
   - Control flow: `JMP`, `Jcc` (all 16 condition codes rel8/rel32), `CALL` (rel32 & indirect register/memory), `RET` (standard & imm16 pop), `CMOVcc`, `SETcc`.
-  - String primitives: `REP STOSB / STOSD / STOSQ`.
-  - System instructions: `CPUID` (returning AMD Zen 2 Family 17h, AVX2, FMA, BMI1/2 flags), `XGETBV` (OSXSAVE enabled), `UD2` trap stubs.
-  - SIMD / SSE2 / AVX instruction coverage:
+  - String primitives: `REP STOSB / STOSD / STOSQ`, `REP MOVSB / MOVSD / MOVSQ`.
+  - System instructions: `CPUID` (returning AMD Zen 2 Family 17h, AVX2, FMA, BMI1/2 flags), `XGETBV` (OSXSAVE enabled), `UD2` trap stubs, `INT imm8` (Windows `__fastfail` diagnostic dispatch).
+  - SIMD / SSE / AVX / AVX2 instruction coverage:
     - 128-bit vector moves: `MOVUPS`, `MOVAPS`, `MOVAPD`, `MOVNTPS`, `MOVDQA`, `MOVDQU`.
     - GPR/XMM transitions: `MOVD / MOVQ` (64-bit GPR <-> low quadword of XMM), `MOVSD`.
-    - Vector interleaving: `PUNPCKLBW` (byte duplication and unpacking for vector initialization).
-    - Bitwise vector logic: `XORPS`, `XORPD`, `ANDPS`, `ANDPD`, `PAND`, `ORPS`, `ORPD`, `POR`.
-    - Scalar double arithmetic: `ADDSD`, `SUBSD`, `MULSD`, `DIVSD`.
-    - Double comparisons: `COMISD`, `UCOMISD`.
-    - Type conversions: `CVTSI2SD`, `CVTSD2SI`.
-    - Vector shifts & packed arithmetic: `PSRLQ`, `PSUBQ`, `PSUBD`.
+    - Vector interleaving: `PUNPCKLBW`, `UNPCKLPS`, `PUNPCKLDQ`, `PUNPCKLQDQ`.
+    - Bitwise vector logic: `XORPS`, `XORPD`, `ANDPS`, `ANDPD`, `ANDNPS`, `ORPS`, `ORPD`.
+    - Scalar and packed single/double precision math: `ADDSS`, `ADDSD`, `ADDPS`, `ADDPD`, `SUBSS`, `SUBSD`, `SUBPS`, `SUBPD`, `MULSS`, `MULSD`, `MULPS`, `MULPD`, `DIVSS`, `DIVSD`, `DIVPS`, `DIVPD`.
+    - Square root & reciprocal: `SQRTSS`, `SQRTSD`, `SQRTPS`, `RSQRTSS`, `RSQRTPS`, `RCPSS`, `RCPPS`.
+    - Vector mask extraction: `MOVMSKPS`, `PMOVMSKB`.
+    - Floating point comparisons: `COMISD`, `UCOMISD`.
+    - Float/Integer conversions: `CVTSI2SD`, `CVTSI2SS`, `CVTSD2SI`, `CVTSS2SI`, `CVTTSD2SI`, `CVTTSS2SI`, `CVTSD2SS`, `CVTSS2SD`.
+    - 256-bit AVX2 vector operations: 2-byte (`0xC5`) and 3-byte (`0xC4`) VEX prefixes, `VPCMPEQB`, `VPCMPEQW`, `VPCMPEQD`, `VPXOR`, `VMOVDQA`, `VMOVDQU`.
 - [x] **High-Level Operating System Emulation (GameOS / Win32 HLE):**
-  - Over 66 foundational OS APIs implemented across `KERNEL32.dll` and `ntdll.dll`.
-  - Memory management: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`, `HeapAlloc`, `HeapFree`, `HeapReAlloc`, `HeapSize`, `GetProcessHeap`.
-  - Threading & synchronization: `InitializeCriticalSectionAndSpinCount`, `EnterCriticalSection`, `LeaveCriticalSection`, `DeleteCriticalSection`, `InitializeSListHead`, `TlsAlloc`, `TlsGetValue`, `TlsSetValue`, `TlsFree`.
-  - Timing & Performance: `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetSystemTimeAsFileTime`.
-  - Module & String handling: `GetModuleHandleW`, `GetModuleHandleExW`, `GetModuleFileNameW`, `MultiByteToWideChar`, `WideCharToMultiByte`, `GetStringTypeW`, `LCMapStringW`.
-  - Process lifecycle: `GetStartupInfoW`, `GetCommandLineA/W`, `GetEnvironmentStringsW`, `FreeEnvironmentStringsW`, `ExitProcess`, `TerminateProcess`.
+  - Over 100 foundational OS APIs implemented across `KERNEL32.dll`, `ntdll.dll`, `user32.dll`, `ole32.dll`, `oleaut32.dll`, `bcrypt.dll`, `version.dll`, `advapi32.dll`, `shell32.dll`.
+  - Memory management: `VirtualAlloc` (allocating 512 MB+ GDDR6 buffers), `VirtualFree`, `VirtualProtect`, `HeapAlloc`, `HeapFree`, `HeapReAlloc`, `HeapSize`, `GetProcessHeap`, `LocalFree`.
+  - Dynamic module loading: `LoadLibraryA`, `LoadLibraryW`, `LoadLibraryExW`, `GetProcAddress` (resolving against loaded PE module EAT exports or HLE hooks), `FreeLibrary`.
+  - Threading & synchronization: `InitializeCriticalSectionAndSpinCount`, `EnterCriticalSection`, `LeaveCriticalSection`, `DeleteCriticalSection`, `InitializeSRWLock`, `AcquireSRWLockExclusive/Shared`, `ReleaseSRWLockExclusive/Shared`, `CreateMutexW`, `CreateSemaphoreW`, `ReleaseSemaphore`, `WaitForSingleObjectEx`, `InitializeSListHead`, `TlsAlloc`, `TlsGetValue`, `TlsSetValue`, `TlsFree`.
+  - Hardware & system topology: `GetNativeSystemInfo`, `GetSystemInfo` (AMD64, 8 Zen 2 cores, 4KB pages, 64KB granularity), `GetLogicalProcessorInformationEx`.
+  - Windowing & message pump stubs: `RegisterClassExW`, `CreateWindowExW`, `ShowWindow`, `UpdateWindow`, `GetClientRect`, `GetWindowRect`, `PeekMessageW`, `DispatchMessageW`, `TranslateMessage`, `MessageBoxA/W`.
+  - Cryptography & COM: `BCryptGenRandom` (macOS `arc4random_buf` bridge), `CoInitializeEx`, `CoCreateInstance`, `SysAllocStringLen`, `SysFreeString`, `SysStringLen`.
 - [x] **Apple Metal 3 Presentation Subsystem:**
   - Native Cocoa / AppKit window creation (`NSWindow`, `NSApplication`).
   - `CAMetalLayer` swapchain configured for 1920x1080 resolution.
   - Metal Shading Language (MSL) pipeline state compilation and frame presentation loop.
-- [x] **Real Commercial Game Verification:**
-  - ***The Mortuary Assistant.exe*** (Unity 64-bit) bootstrapped through 1,000,000+ instructions.
-  - Passed all MSVC security canary checks, CPUID Zen 2 feature validation, and vector initialization.
-  - Successfully dispatched to `UnityPlayer.dll!UnityMain(hInstance, hPrevInstance, lpCmdLine, nShowCmd)`.
+- [x] **Production Commercial Game Verification:**
+  - ***The Mortuary Assistant.exe*** (Unity 64-bit + IL2CPP) executed past **50,000,000 instructions** without crashes or memory violations.
+  - Successfully loaded Unity engine runtime (`UnityPlayer.dll`) and IL2CPP gameplay assembly (`GameAssembly.dll`).
+  - Passed all security canary cookies, Zen 2 CPUID feature detection, memory scanner loops, and CRT threadpools.
 
 ---
 
 ### 7.2 Current Engineering Focus / Что делаем сейчас
-- [ ] **Multi-Module Dynamic DLL Loading (`UnityPlayer.dll`):**
-  - Expanding `PeLoader` to dynamically map secondary library dependencies (`UnityPlayer.dll`, 28.4 MB) into the unified guest address space (`0x180000000`) alongside the main executable.
-  - Parsing the Export Address Table (EAT) to resolve exported symbols (`UnityMain` at RVA `0x6d3750`) dynamically.
-  - Resolving dependent import libraries for `UnityPlayer.dll` (ADVAPI32, USER32, GDI32, SHELL32, WS2_32, OLE32, D3D12).
-- [ ] **Native Direct Entry Point Execution:**
-  - Replacing the HLE hook for `UnityMain` with a direct jump into the loaded `UnityPlayer.dll` code segment, transitioning execution from launcher bootstrap to real engine runtime.
+- [ ] **Direct3D 12 / DXGI to Apple Metal Surface Hooking:**
+  - Linking game window swapchains (`IDXGISwapChain::Present`) directly to `CAMetalLayer` drawables to continuously render live game frames on screen.
+  - Bridging DirectX command list submission (`ID3D12CommandQueue::ExecuteCommandLists`) to Metal Command Buffers (`MTLCommandBuffer`).
+- [ ] **Virtual File System (VFS) Streaming:**
+  - Connecting `CreateFileW`, `ReadFile`, and directory enumeration to mount `The Mortuary Assistant_Data/` asset bundles directly from host macOS disk paths.
 
 ---
 
 ### 7.3 What Lies Ahead / Что предстоит
-- [ ] **GameAssembly.dll & IL2CPP Runtime Ingestion:**
-  - Loading the 45 MB `GameAssembly.dll` containing the compiled C# gameplay code of *The Mortuary Assistant*.
-  - Initializing the IL2CPP runtime, metadata structures (`global-metadata.dat`), and garbage collection stubs.
-- [ ] **Direct3D 12 to Apple Metal Graphics Translation Layer:**
-  - Intercepting D3D12 command lists, descriptor heaps, root signatures, and pipeline states.
-  - Translating DirectX Intermediate Language (DXIL) shader bytecode directly to Metal Shading Language (MSL).
-  - Binding Metal vertex, index, and uniform buffers from GDDR6 guest memory.
-- [ ] **Virtual File System (VFS):**
-  - Mapping Windows directory separators and case-insensitive file accesses to host macOS APFS paths.
-  - Mounting `The Mortuary Assistant_Data/` asset archives and streaming game assets into memory.
+- [ ] **DirectX Intermediate Language (DXIL) to MSL Shader Decompilation:**
+  - Translating precompiled shader bytecodes into native Metal Shading Language.
 - [ ] **Audio & Input Subsystems:**
-  - Translating XAudio2 / DirectSound audio buffers to Apple CoreAudio output streams.
-  - Intercepting XInput controller states and macOS HID keyboard/mouse inputs for interactive gameplay.
+  - CoreAudio backend translation for XAudio2 / DirectSound.
+  - Game Controller / HID mapping for keyboard, mouse, and gamepads.
 - [ ] **ARM64 JIT Dynamic Binary Translation:**
-  - Implementing an optimizing basic-block JIT compiler translating x86-64 Zen 2 machine code directly to native Apple Silicon ARM64 instructions for smooth 60 FPS real-time execution.
+  - Implementing basic-block and trace JIT compilers emitting native ARM64 instructions for smooth 60 FPS real-time execution.
 
 ---
 

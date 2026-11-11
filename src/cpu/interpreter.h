@@ -15,6 +15,7 @@ enum class OpcodeType {
     Nop,
     Halt,
     HleTrap,
+    Int,
     Mov,
     Movzx,
     Movsxd,
@@ -49,6 +50,8 @@ enum class OpcodeType {
     Cpuid,
     Xgetbv,
     Cmpxchg,
+    Cmpxchg16b,
+    Cmpxchg8b,
     Cmov,
     Setcc,
     Jmp,
@@ -69,9 +72,36 @@ enum class OpcodeType {
     Subsd,
     Mulsd,
     Divsd,
+    Addss,
+    Subss,
+    Mulss,
+    Divss,
+    Rsqrtss,
+    Rcpss,
+    Addps,
+    Subps,
+    Mulps,
+    Divps,
+    Sqrtps,
+    Rsqrtps,
+    Rcpps,
+    Addpd,
+    Subpd,
+    Mulpd,
+    Divpd,
+    Andnps,
+    Movmskps,
+    Cvtsd2ss,
+    Cvtss2sd,
+    Sqrtss,
+    Sqrtsd,
     Comisd,
     Cvtsi2sd,
+    Cvtsi2ss,
     Cvtsd2si,
+    Cvtss2si,
+    Cvttsd2si,
+    Cvttss2si,
     Bswap,
     Cdq,
     Cdqe,
@@ -81,7 +111,30 @@ enum class OpcodeType {
     Btc,
     Psrlq,
     Psubq,
-    Psubd
+    Psubd,
+    Pshuflw,
+    Pshufhw,
+    Pshufd,
+    Pcmpeqb,
+    Pcmpeqw,
+    Pcmpeqd,
+    Pmovmskb,
+    Bsf,
+    Bsr,
+    Popcnt,
+    Punpcklqdq,
+    Punpckhqdq,
+    Punpcklwd,
+    Punpckldq,
+    Vzeroupper,
+    Vpxor,
+    Vpcmpeqb,
+    Vpcmpeqw,
+    Vpcmpeqd,
+    Vmovdqa,
+    Vmovdqu,
+    Pcmpistri,
+    Unpcklps
 };
 
 struct Operand {
@@ -118,6 +171,7 @@ struct DecodedInstruction {
 
     Operand op1; // Typically destination
     Operand op2; // Typically source
+    Operand op3; // Extra source (AVX vvvv)
 };
 
 class X86Decoder {
@@ -152,7 +206,7 @@ private:
 
     u64 ReadOperand(const Operand& op, u8 instLen) const;
     void WriteOperand(const Operand& op, u64 val, u8 instLen, bool hasRex);
-    void UpdateFlagsArithmetic(u64 result, u64 op1, u64 op2, u8 opSize, bool isSub);
+    void UpdateFlagsArithmetic(u64 result, u64 op1, u64 op2, u8 opSize, bool isSub, bool updateCarry = true);
     void UpdateFlagsLogic(u64 result, u8 opSize);
 };
 

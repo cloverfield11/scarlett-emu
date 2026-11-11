@@ -9,12 +9,16 @@ namespace Scarlett {
 // required by Microsoft Visual C++ CRT startup and Unity bootstrap
 #pragma pack(push, 1)
 struct GuestTeb {
-    u64 reserved1[6];       // 0x00 - 0x28
-    GuestAddr self;         // 0x30: Linear address of TEB (points to self)
-    GuestAddr fiberData;    // 0x38
-    GuestAddr arbitraryData;// 0x40
-    GuestAddr peb;          // 0x60: Pointer to PEB
-    u32 lastError;          // 0x68
+    GuestAddr exceptionList; // 0x00: Current Structured Exception Handling (SEH) frame
+    GuestAddr stackBase;     // 0x08: Top of stack
+    GuestAddr stackLimit;    // 0x10: Bottom of stack (used by __chkstk)
+    GuestAddr subSystemTib;  // 0x18
+    GuestAddr fiberData;     // 0x20
+    GuestAddr arbitraryData; // 0x28
+    GuestAddr self;          // 0x30: Linear address of TEB (points to self)
+    GuestAddr reserved1[5];  // 0x38 - 0x60
+    GuestAddr peb;           // 0x60: Pointer to PEB
+    u32 lastError;           // 0x68
     u32 countOfOwnedCriticalSections; // 0x6C
     GuestAddr csrClientThread;        // 0x70
     GuestAddr win32ThreadInfo;        // 0x78
@@ -45,6 +49,8 @@ public:
         GuestAddr pebAddr = tebAddr + 0x1000;
 
         GuestTeb teb{};
+        teb.stackBase = GUEST_MEMORY_BASE + 0x800000;  // 0x100800000
+        teb.stackLimit = GUEST_MEMORY_BASE + 0x000000; // 0x100000000 (8 MB stack)
         teb.self = tebAddr;
         teb.peb = pebAddr;
 

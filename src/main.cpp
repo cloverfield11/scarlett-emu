@@ -8,6 +8,7 @@
 #include "kernel/hle_kernel.h"
 #include "gpu/metal_renderer.h"
 #include "cpu/teb.h"
+#include "kernel/modules/kernel32.h"
 #include <iostream>
 #include <vector>
 #include <unistd.h>
@@ -118,22 +119,75 @@ int main(int argc, char* argv[]) {
     }
 
     Scarlett::PeLoader loader(memory);
+    Scarlett::Modules::SetPeLoader(&loader);
+
+    // If UnityPlayer.dll exists in the game directory, preload it so its exports (e.g. UnityMain) are registered
+    std::string unityPlayerPath = dirPath + "/UnityPlayer.dll";
+    if (access(unityPlayerPath.c_str(), F_OK) == 0) {
+        LOG_INFO("Core", "Found Unity Engine runtime library: " + unityPlayerPath);
+        loader.LoadModule(unityPlayerPath);
+    }
+
+    // Preload baselib.dll if present
+    std::string baselibPath = dirPath + "/baselib.dll";
+    if (access(baselibPath.c_str(), F_OK) == 0) {
+        LOG_INFO("Core", "Found baselib library: " + baselibPath);
+        loader.LoadModule(baselibPath);
+    }
+
+    // Preload GameAssembly.dll (IL2CPP) if present
+    std::string gameAssemblyPath = dirPath + "/GameAssembly.dll";
+    if (access(gameAssemblyPath.c_str(), F_OK) == 0) {
+        LOG_INFO("Core", "Found GameAssembly runtime (IL2CPP): " + gameAssemblyPath);
+        loader.LoadModule(gameAssemblyPath);
+    }
+
     if (!loader.LoadExecutable(binaryPath)) {
         LOG_ERROR("Core", "Failed to load binary into memory!");
         return 1;
     }
 
-    // Setup CPU context and dispatch entry point
+    // Setup CPU context and TEB/PEB
     Scarlett::CpuContext cpu;
+    cpu.gsBase = Scarlett::EnvironmentManager::InitializeTebPeb(memory, loader.GetImageBase());
+
+    // Execute DllMain for any preloaded DLL modules (e.g. UnityPlayer.dll) with DLL_PROCESS_ATTACH
+    for (const auto& mod : loader.GetLoadedModules()) {
+        if (mod.entryPoint != 0 && mod.imageBase != loader.GetImageBase()) {
+            LOG_INFO("Core", "Executing DllMain (DLL_PROCESS_ATTACH) for '" + mod.name + "' at 0x" + std::to_string(mod.entryPoint) + "...");
+            Scarlett::CpuContext dllCpu;
+            dllCpu.gsBase = cpu.gsBase;
+
+            // Write a halt instruction (0xF4) at a dedicated return trap address
+            Scarlett::GuestAddr retHaltAddr = 0x1500F0000ULL;
+            Scarlett::u8 haltOp = 0xF4; // HLT
+            memory.WriteBytes(retHaltAddr, &haltOp, 1);
+
+            // Setup stack according to x64 ABI: [RSP] = return address, [RSP+8..RSP+39] = shadow space
+            Scarlett::GuestAddr stackTop = Scarlett::GUEST_MEMORY_BASE + 0x700000 - 0x28;
+            memory.Write<Scarlett::u64>(stackTop, retHaltAddr);
+
+            dllCpu.rip = mod.entryPoint;
+            dllCpu.rsp = stackTop;
+            dllCpu.rcx = mod.imageBase; // hinstDLL
+            dllCpu.rdx = 1;             // DLL_PROCESS_ATTACH
+            dllCpu.r8 = 0;              // lpvReserved
+
+            Scarlett::Interpreter dllInterp(dllCpu, memory, &kernel, &loader.GetImports());
+            dllInterp.Run(200000);
+            LOG_INFO("Core", "DllMain for '" + mod.name + "' completed successfully. (Result RAX=" + std::to_string(dllCpu.rax) + ")");
+        }
+    }
+
+    // Dispatch to main game executable Entry Point
     cpu.rip = loader.GetEntryPoint();
     cpu.rsp = Scarlett::GUEST_MEMORY_BASE + 0x800000;
-    cpu.gsBase = Scarlett::EnvironmentManager::InitializeTebPeb(memory, loader.GetImageBase());
 
     LOG_INFO("Core", "Dispatching to Entry Point: 0x" + std::to_string(cpu.rip));
     cpu.DumpState();
 
     Scarlett::Interpreter interp(cpu, memory, &kernel, &loader.GetImports());
-    interp.Run();
+    interp.Run(50000000);
 
     // If a graphics window was created by D3D12/Metal, run presentation loop
     if (gpu.IsRunning()) {

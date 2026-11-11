@@ -4,6 +4,7 @@
 #include "cpu/memory_manager.h"
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace Scarlett {
 
@@ -101,20 +102,44 @@ struct ImportedFunction {
     u32 hookId{0};
 };
 
+struct ExportedFunction {
+    std::string name;
+    u16 ordinal{0};
+    GuestAddr address{0};
+};
+
+struct LoadedModule {
+    std::string name;
+    std::string filePath;
+    GuestAddr imageBase{0};
+    GuestAddr entryPoint{0};
+    u32 sizeOfImage{0};
+    OptionalHeader64 optHeader{};
+    std::vector<SectionHeader> sections;
+    std::vector<ExportedFunction> exports;
+    std::unordered_map<std::string, GuestAddr> exportMap; // lowercase name -> address
+};
+
 class PeLoader {
 public:
     PeLoader(MemoryManager& memory);
 
     bool LoadExecutable(const std::string& filePath);
+    bool LoadModule(const std::string& filePath, LoadedModule* outModule = nullptr);
 
     GuestAddr GetEntryPoint() const { return m_entryPoint; }
     GuestAddr GetImageBase() const { return m_imageBase; }
     const std::vector<ImportedFunction>& GetImports() const { return m_imports; }
+    const std::vector<LoadedModule>& GetLoadedModules() const { return m_modules; }
+
+    GuestAddr FindExport(const std::string& moduleName, const std::string& functionName) const;
 
 private:
-    bool ParseHeaders(const std::vector<u8>& rawData);
-    bool MapSections(const std::vector<u8>& rawData);
-    bool ParseImports(const std::vector<u8>& rawData);
+    bool ParseHeaders(const std::vector<u8>& rawData, LoadedModule& module);
+    bool MapSections(const std::vector<u8>& rawData, LoadedModule& module);
+    bool ParseExports(const std::vector<u8>& rawData, LoadedModule& module);
+    bool ParseImports(const std::vector<u8>& rawData, LoadedModule& module);
+    bool ApplyRelocations(LoadedModule& module, s64 delta);
 
     MemoryManager& m_memory;
     GuestAddr m_imageBase{0};
@@ -124,6 +149,10 @@ private:
     OptionalHeader64 m_optHeader{};
     std::vector<SectionHeader> m_sections;
     std::vector<ImportedFunction> m_imports;
+    std::vector<LoadedModule> m_modules;
+
+    GuestAddr m_trampolinePool{0};
+    u32 m_trampolineOffset{0};
 };
 
 } // namespace Scarlett

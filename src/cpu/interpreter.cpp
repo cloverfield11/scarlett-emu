@@ -175,7 +175,7 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     }
 
     // 2. Decode REX prefix (0x40 - 0x4F in 64-bit mode)
-    if ((code[offset] & 0xF0) == 0x40) {
+    while ((code[offset] & 0xF0) == 0x40) {
         rex = code[offset++];
         inst.hasRex = true;
     }
@@ -187,6 +187,156 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     inst.opSize = defaultOpSize;
 
     u8 opcode = code[offset++];
+
+    // VEX 2-byte prefix: 0xC5
+    if (opcode == 0xC5) {
+        u8 byte1 = code[offset++];
+        u8 vexR = (byte1 & 0x80) ? 0 : 4; // REX.R equivalent (inverted)
+        u8 vvvv = (~byte1 >> 3) & 0x0F;
+        bool vexL = (byte1 & 0x04) != 0;
+        u8 pp = byte1 & 0x03; // 0=none, 1=66, 2=F3, 3=F2
+
+        u8 opVex = code[offset++];
+        u8 rexVex = vexR;
+        u8 vecSize = vexL ? 32 : 16;
+        inst.opSize = vecSize;
+
+        if (opVex == 0x77) { // VZEROUPPER
+            inst.type = OpcodeType::Vzeroupper;
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0xD7 && pp == 1) { // VPMOVMSKB r32, xmm/ymm
+            inst.type = OpcodeType::Pmovmskb;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+            inst.op1.size = 4;
+            inst.op2.size = vecSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0xEF && pp == 1) { // VPXOR
+            inst.type = OpcodeType::Vpxor;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+            inst.op3.kind = Operand::Kind::Register;
+            inst.op3.reg = vvvv;
+            inst.op3.size = vecSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0x74 && pp == 1) { // VPCMPEQB
+            inst.type = OpcodeType::Vpcmpeqb;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+            inst.op3.kind = Operand::Kind::Register;
+            inst.op3.reg = vvvv;
+            inst.op3.size = vecSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0x75 && pp == 1) { // VPCMPEQW
+            inst.type = OpcodeType::Vpcmpeqw;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+            inst.op3.kind = Operand::Kind::Register;
+            inst.op3.reg = vvvv;
+            inst.op3.size = vecSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0x76 && pp == 1) { // VPCMPEQD
+            inst.type = OpcodeType::Vpcmpeqd;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+            inst.op3.kind = Operand::Kind::Register;
+            inst.op3.reg = vvvv;
+            inst.op3.size = vecSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0x6F) { // VMOVDQA
+            inst.type = OpcodeType::Vmovdqa;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+            inst.length = offset;
+            return inst;
+        }
+
+        if (opVex == 0x7F) { // VMOVDQA store
+            inst.type = OpcodeType::Vmovdqa;
+            DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op2, inst.op1);
+            inst.length = offset;
+            return inst;
+        }
+    }
+
+    // VEX 3-byte prefix: 0xC4
+    if (opcode == 0xC4) {
+        u8 byte1 = code[offset++];
+        u8 byte2 = code[offset++];
+        u8 vexR = (byte1 & 0x80) ? 0 : 4;
+        u8 vexX = (byte1 & 0x40) ? 0 : 2;
+        u8 vexB = (byte1 & 0x20) ? 0 : 1;
+        u8 m_mmmm = byte1 & 0x1F; // 1 = 0F, 2 = 0F 38, 3 = 0F 3A
+
+        bool vexW = (byte2 & 0x80) != 0;
+        u8 vvvv = (~byte2 >> 3) & 0x0F;
+        bool vexL = (byte2 & 0x04) != 0;
+        u8 pp = byte2 & 0x03;
+
+        u8 rexVex = vexR | vexX | vexB | (vexW ? 8 : 0);
+        u8 opVex = code[offset++];
+        u8 vecSize = vexL ? 32 : 16;
+        inst.opSize = vecSize;
+
+        if (m_mmmm == 1) { // 0F map
+            if (opVex == 0x75 && pp == 1) { // VPCMPEQW
+                inst.type = OpcodeType::Vpcmpeqw;
+                DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+                inst.op3.kind = Operand::Kind::Register;
+                inst.op3.reg = vvvv;
+                inst.op3.size = vecSize;
+                inst.length = offset;
+                return inst;
+            }
+            if (opVex == 0x74 && pp == 1) { // VPCMPEQB
+                inst.type = OpcodeType::Vpcmpeqb;
+                DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+                inst.op3.kind = Operand::Kind::Register;
+                inst.op3.reg = vvvv;
+                inst.op3.size = vecSize;
+                inst.length = offset;
+                return inst;
+            }
+            if (opVex == 0x76 && pp == 1) { // VPCMPEQD
+                inst.type = OpcodeType::Vpcmpeqd;
+                DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+                inst.op3.kind = Operand::Kind::Register;
+                inst.op3.reg = vvvv;
+                inst.op3.size = vecSize;
+                inst.length = offset;
+                return inst;
+            }
+            if (opVex == 0xEF && pp == 1) { // VPXOR
+                inst.type = OpcodeType::Vpxor;
+                DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+                inst.op3.kind = Operand::Kind::Register;
+                inst.op3.reg = vvvv;
+                inst.op3.size = vecSize;
+                inst.length = offset;
+                return inst;
+            }
+            if (opVex == 0xD7 && pp == 1) { // VPMOVMSKB
+                inst.type = OpcodeType::Pmovmskb;
+                DecodeModRM(code, offset, rexVex, isGs, vecSize, inst.op1, inst.op2);
+                inst.op1.size = 4;
+                inst.op2.size = vecSize;
+                inst.length = offset;
+                return inst;
+            }
+        }
+    }
 
     // 0x90: NOP
     if (opcode == 0x90) {
@@ -219,6 +369,16 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     // 0xCC: INT3 (treat as Nop / Trap)
     if (opcode == 0xCC) {
         inst.type = OpcodeType::Nop;
+        inst.length = offset;
+        return inst;
+    }
+
+    // 0xCD: INT imm8
+    if (opcode == 0xCD) {
+        inst.type = OpcodeType::Int;
+        inst.op1.kind = Operand::Kind::Immediate;
+        inst.op1.imm = code[offset++];
+        inst.op1.size = 1;
         inst.length = offset;
         return inst;
     }
@@ -328,6 +488,30 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
         return inst;
     }
 
+    // 0x69: IMUL reg, r/m, imm32
+    // 0x6B: IMUL reg, r/m, imm8
+    if (opcode == 0x69 || opcode == 0x6B) {
+        inst.type = OpcodeType::Imul;
+        inst.opSize = defaultOpSize;
+        DecodeModRM(code, offset, rex, isGs, defaultOpSize, inst.op1, inst.op2);
+        inst.op3.kind = Operand::Kind::Immediate;
+        if (opcode == 0x6B) {
+            inst.op3.imm = static_cast<u64>(static_cast<s64>(static_cast<s8>(code[offset++])));
+            inst.op3.size = defaultOpSize;
+        } else {
+            if (defaultOpSize == 2) {
+                inst.op3.imm = static_cast<u64>(static_cast<s64>(*reinterpret_cast<const s16*>(code + offset)));
+                offset += 2;
+            } else {
+                inst.op3.imm = static_cast<u64>(static_cast<s64>(*reinterpret_cast<const s32*>(code + offset)));
+                offset += 4;
+            }
+            inst.op3.size = defaultOpSize;
+        }
+        inst.length = offset;
+        return inst;
+    }
+
     // 0xB0 - 0xB7: MOV r8, imm8
     if (opcode >= 0xB0 && opcode <= 0xB7) {
         inst.type = OpcodeType::Mov;
@@ -399,82 +583,40 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
         }
     }
 
-    // 0x00 - 0x05: ADD
-    if (opcode >= 0x00 && opcode <= 0x05) {
-        inst.type = OpcodeType::Add;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x08 - 0x0D: OR
-    if (opcode >= 0x08 && opcode <= 0x0D) {
-        inst.type = OpcodeType::Or;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x10 - 0x15: ADC
-    if (opcode >= 0x10 && opcode <= 0x15) {
-        inst.type = OpcodeType::Adc;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x18 - 0x1D: SBB
-    if (opcode >= 0x18 && opcode <= 0x1D) {
-        inst.type = OpcodeType::Sbb;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x20 - 0x25: AND
-    if (opcode >= 0x20 && opcode <= 0x25) {
-        inst.type = OpcodeType::And;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x28 - 0x2D: SUB
-    if (opcode >= 0x28 && opcode <= 0x2D) {
-        inst.type = OpcodeType::Sub;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x30 - 0x35: XOR
-    if (opcode >= 0x30 && opcode <= 0x35) {
-        inst.type = OpcodeType::Xor;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
-        inst.length = offset;
-        return inst;
-    }
-
-    // 0x38 - 0x3D: CMP
-    if (opcode >= 0x38 && opcode <= 0x3D) {
-        inst.type = OpcodeType::Cmp;
-        u8 sz = (opcode & 1) ? defaultOpSize : 1;
-        if ((opcode & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
-        else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
+    // 0x00 - 0x3D: ALU operations (ADD, OR, ADC, SBB, AND, SUB, XOR, CMP)
+    if (opcode <= 0x3D && (opcode & 7) <= 5) {
+        static const OpcodeType aluOps[8] = {
+            OpcodeType::Add, OpcodeType::Or, OpcodeType::Adc, OpcodeType::Sbb,
+            OpcodeType::And, OpcodeType::Sub, OpcodeType::Xor, OpcodeType::Cmp
+        };
+        inst.type = aluOps[(opcode >> 3) & 7];
+        u8 sub = opcode & 7;
+        if (sub <= 3) {
+            u8 sz = (sub & 1) ? defaultOpSize : 1;
+            if ((sub & 2) == 0) DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
+            else DecodeModRM(code, offset, rex, isGs, sz, inst.op1, inst.op2);
+        } else if (sub == 4) { // AL, imm8
+            inst.op1.kind = Operand::Kind::Register;
+            inst.op1.reg = 0; // AL
+            inst.op1.size = 1;
+            inst.op2.kind = Operand::Kind::Immediate;
+            inst.op2.imm = code[offset++];
+            inst.op2.size = 1;
+        } else if (sub == 5) { // (E)AX, imm16/imm32
+            inst.op1.kind = Operand::Kind::Register;
+            inst.op1.reg = 0; // RAX / EAX
+            inst.op1.size = defaultOpSize;
+            inst.op2.kind = Operand::Kind::Immediate;
+            if (defaultOpSize == 2) {
+                inst.op2.imm = *reinterpret_cast<const u16*>(code + offset);
+                offset += 2;
+            } else {
+                s32 imm32 = *reinterpret_cast<const s32*>(code + offset);
+                offset += 4;
+                inst.op2.imm = (defaultOpSize == 8) ? static_cast<u64>(static_cast<s64>(imm32)) : static_cast<u32>(imm32);
+            }
+            inst.op2.size = defaultOpSize;
+        }
         inst.length = offset;
         return inst;
     }
@@ -741,6 +883,19 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
         return inst;
     }
 
+    // 0xFE: Group 4 (INC r/m8, DEC r/m8)
+    if (opcode == 0xFE) {
+        u8 modrm = code[offset];
+        u8 subop = (modrm >> 3) & 7;
+        Operand unused;
+        DecodeModRM(code, offset, rex, isGs, 1, unused, inst.op1);
+
+        if (subop == 0) inst.type = OpcodeType::Inc;
+        else if (subop == 1) inst.type = OpcodeType::Dec;
+        inst.length = offset;
+        return inst;
+    }
+
     // 0xFF: Group 5 (INC, DEC, CALL, CALLF, JMP, JMPF, PUSH)
     if (opcode == 0xFF) {
         u8 modrm = code[offset];
@@ -761,6 +916,28 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
     // Two-byte opcodes: 0x0F ...
     if (opcode == 0x0F) {
         u8 op2 = code[offset++];
+
+        // 0x0F 0x14: UNPCKLPS xmm1, xmm2/m128
+        if (op2 == 0x14) {
+            inst.type = OpcodeType::Unpcklps;
+            DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x3A: 3-byte SSE4 opcode prefix
+        if (op2 == 0x3A) {
+            u8 op3 = code[offset++];
+            if (op3 == 0x63) { // PCMPISTRI
+                inst.type = OpcodeType::Pcmpistri;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+                inst.op3.kind = Operand::Kind::Immediate;
+                inst.op3.imm = code[offset++];
+                inst.op3.size = 1;
+                inst.length = offset;
+                return inst;
+            }
+        }
 
         // 0x0F 0x01: XGETBV (0x0F 0x01 0xD0)
         if (op2 == 0x01 && code[offset] == 0xD0) {
@@ -848,9 +1025,13 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             return inst;
         }
 
-        // 0x0F 0x2A: CVTSI2SD (with F2)
+        // 0x0F 0x2A: CVTSI2SD (with F2) / CVTSI2SS (with F3)
         if (op2 == 0x2A) {
-            inst.type = OpcodeType::Cvtsi2sd;
+            if (hasF3) {
+                inst.type = OpcodeType::Cvtsi2ss;
+            } else {
+                inst.type = OpcodeType::Cvtsi2sd;
+            }
             DecodeModRM(code, offset, rex, isGs, defaultOpSize, inst.op1, inst.op2);
             inst.length = offset;
             return inst;
@@ -864,10 +1045,29 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             return inst;
         }
 
-        // 0x0F 0x2D: CVTSD2SI (with F2)
+        // 0x0F 0x2C: CVTTSS2SI (with F3) / CVTTSD2SI (with F2)
+        if (op2 == 0x2C) {
+            if (hasF3) {
+                inst.type = OpcodeType::Cvttss2si;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Cvttsd2si;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            }
+            inst.op1.size = defaultOpSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x2D: CVTSS2SI (with F3) / CVTSD2SI (with F2)
         if (op2 == 0x2D) {
-            inst.type = OpcodeType::Cvtsd2si;
-            DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            if (hasF3) {
+                inst.type = OpcodeType::Cvtss2si;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Cvtsd2si;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            }
             inst.op1.size = defaultOpSize;
             inst.length = offset;
             return inst;
@@ -890,9 +1090,68 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             return inst;
         }
 
+        // 0x0F 0x50: MOVMSKPS / MOVMSKPD
+        if (op2 == 0x50) {
+            inst.type = OpcodeType::Movmskps;
+            DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            inst.op1.size = defaultOpSize;
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x51: SQRTSS (F3) / SQRTSD (F2) / SQRTPS
+        if (op2 == 0x51) {
+            if (hasF3) {
+                inst.type = OpcodeType::Sqrtss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else if (hasF2) {
+                inst.type = OpcodeType::Sqrtsd;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Sqrtps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x52: RSQRTSS (F3) / RSQRTPS
+        if (op2 == 0x52) {
+            if (hasF3) {
+                inst.type = OpcodeType::Rsqrtss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Rsqrtps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x53: RCPSS (F3) / RCPPS
+        if (op2 == 0x53) {
+            if (hasF3) {
+                inst.type = OpcodeType::Rcpss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Rcpps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
+            inst.length = offset;
+            return inst;
+        }
+
         // 0x0F 0x54: ANDPS / ANDPD
         if (op2 == 0x54 || op2 == 0xDB) {
             inst.type = OpcodeType::Andps;
+            DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x55: ANDNPS / ANDNPD
+        if (op2 == 0x55 || op2 == 0xDF) {
+            inst.type = OpcodeType::Andnps;
             DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
             inst.length = offset;
             return inst;
@@ -914,34 +1173,91 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             return inst;
         }
 
-        // 0x0F 0x58: ADDSD (with F2)
+        // 0x0F 0x58: ADDSS (F3) / ADDSD (F2) / ADDPD (66) / ADDPS
         if (op2 == 0x58) {
-            inst.type = OpcodeType::Addsd;
-            DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            if (hasF3) {
+                inst.type = OpcodeType::Addss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else if (hasF2) {
+                inst.type = OpcodeType::Addsd;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            } else if (has66) {
+                inst.type = OpcodeType::Addpd;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Addps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
             inst.length = offset;
             return inst;
         }
 
-        // 0x0F 0x59: MULSD (with F2)
+        // 0x0F 0x59: MULSS (F3) / MULSD (F2) / MULPD (66) / MULPS
         if (op2 == 0x59) {
-            inst.type = OpcodeType::Mulsd;
-            DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            if (hasF3) {
+                inst.type = OpcodeType::Mulss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else if (hasF2) {
+                inst.type = OpcodeType::Mulsd;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            } else if (has66) {
+                inst.type = OpcodeType::Mulpd;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Mulps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
             inst.length = offset;
             return inst;
         }
 
-        // 0x0F 0x5C: SUBSD (with F2)
+        // 0x0F 0x5A: CVTSS2SD (F3) / CVTSD2SS (F2)
+        if (op2 == 0x5A) {
+            if (hasF3) {
+                inst.type = OpcodeType::Cvtss2sd;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Cvtsd2ss;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            }
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0x5C: SUBSS (F3) / SUBSD (F2) / SUBPD (66) / SUBPS
         if (op2 == 0x5C) {
-            inst.type = OpcodeType::Subsd;
-            DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            if (hasF3) {
+                inst.type = OpcodeType::Subss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else if (hasF2) {
+                inst.type = OpcodeType::Subsd;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            } else if (has66) {
+                inst.type = OpcodeType::Subpd;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Subps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
             inst.length = offset;
             return inst;
         }
 
-        // 0x0F 0x5E: DIVSD (with F2)
+        // 0x0F 0x5E: DIVSS (F3) / DIVSD (F2) / DIVPD (66) / DIVPS
         if (op2 == 0x5E) {
-            inst.type = OpcodeType::Divsd;
-            DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            if (hasF3) {
+                inst.type = OpcodeType::Divss;
+                DecodeModRM(code, offset, rex, isGs, 4, inst.op1, inst.op2);
+            } else if (hasF2) {
+                inst.type = OpcodeType::Divsd;
+                DecodeModRM(code, offset, rex, isGs, 8, inst.op1, inst.op2);
+            } else if (has66) {
+                inst.type = OpcodeType::Divpd;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            } else {
+                inst.type = OpcodeType::Divps;
+                DecodeModRM(code, offset, rex, isGs, 16, inst.op1, inst.op2);
+            }
             inst.length = offset;
             return inst;
         }
@@ -1127,6 +1443,31 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             }
         }
 
+
+        // 0x0F 0xB8: POPCNT r, r/m
+        if (op2 == 0xB8) {
+            inst.type = OpcodeType::Popcnt;
+            DecodeModRM(code, offset, rex, isGs, defaultOpSize, inst.op1, inst.op2);
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0xBC: BSF / TZCNT
+        if (op2 == 0xBC) {
+            inst.type = OpcodeType::Bsf;
+            DecodeModRM(code, offset, rex, isGs, defaultOpSize, inst.op1, inst.op2);
+            inst.length = offset;
+            return inst;
+        }
+
+        // 0x0F 0xBD: BSR / LZCNT
+        if (op2 == 0xBD) {
+            inst.type = OpcodeType::Bsr;
+            DecodeModRM(code, offset, rex, isGs, defaultOpSize, inst.op1, inst.op2);
+            inst.length = offset;
+            return inst;
+        }
+
         // 0x0F 0xBB: BTC r/m, r
         if (op2 == 0xBB) {
             inst.type = OpcodeType::Btc;
@@ -1160,6 +1501,24 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             DecodeModRM(code, offset, rex, isGs, sz, inst.op2, inst.op1);
             inst.length = offset;
             return inst;
+        }
+
+        // 0x0F 0xC7: Group 9 (CMPXCHG8B / CMPXCHG16B)
+        if (op2 == 0xC7) {
+            u8 modrm = code[offset];
+            u8 subop = (modrm >> 3) & 7;
+            Operand unused;
+            if (subop == 1) {
+                if (inst.hasRex && (rex & 0x08)) {
+                    inst.type = OpcodeType::Cmpxchg16b;
+                    DecodeModRM(code, offset, rex, isGs, 16, unused, inst.op1);
+                } else {
+                    inst.type = OpcodeType::Cmpxchg8b;
+                    DecodeModRM(code, offset, rex, isGs, 8, unused, inst.op1);
+                }
+                inst.length = offset;
+                return inst;
+            }
         }
 
         // 0x0F 0xC8 - 0x0F 0xCF: BSWAP r32/r64
@@ -1261,7 +1620,7 @@ void Interpreter::WriteOperand(const Operand& op, u64 val, u8 instLen, bool hasR
     }
 }
 
-void Interpreter::UpdateFlagsArithmetic(u64 result, u64 op1, u64 op2, u8 opSize, bool isSub) {
+void Interpreter::UpdateFlagsArithmetic(u64 result, u64 op1, u64 op2, u8 opSize, bool isSub, bool updateCarry) {
     u64 mask = (opSize == 8) ? ~0ULL : ((1ULL << (opSize * 8)) - 1);
     u64 signBit = 1ULL << (opSize * 8 - 1);
 
@@ -1277,12 +1636,14 @@ void Interpreter::UpdateFlagsArithmetic(u64 result, u64 op1, u64 op2, u8 opSize,
     else m_ctx.rflags &= ~0x080;
 
     // CF
-    if (isSub) {
-        if (op1 < op2) m_ctx.rflags |= 0x001;
-        else m_ctx.rflags &= ~0x001;
-    } else {
-        if (result < op1) m_ctx.rflags |= 0x001;
-        else m_ctx.rflags &= ~0x001;
+    if (updateCarry) {
+        if (isSub) {
+            if (op1 < op2) m_ctx.rflags |= 0x001;
+            else m_ctx.rflags &= ~0x001;
+        } else {
+            if (result < op1) m_ctx.rflags |= 0x001;
+            else m_ctx.rflags &= ~0x001;
+        }
     }
 
     // OF
@@ -1345,6 +1706,20 @@ bool Interpreter::Step() {
         case OpcodeType::Halt:
             m_halted = true;
             break;
+
+        case OpcodeType::Int: {
+            u8 vec = static_cast<u8>(inst.op1.imm);
+            if (vec == 0x29) {
+                u64 fastFailCode = m_ctx.rcx;
+                LOG_ERROR("Interpreter", "__fastfail(0x" + std::to_string(fastFailCode) + ") invoked at RIP=0x" + std::to_string(currentRip));
+                m_halted = true;
+            } else if (vec == 3) {
+                LOG_INFO("Interpreter", "INT 3 breakpoint hit at RIP=0x" + std::to_string(currentRip));
+            } else {
+                LOG_WARN("Interpreter", "INT " + std::to_string(vec) + " invoked at RIP=0x" + std::to_string(currentRip));
+            }
+            break;
+        }
 
         case OpcodeType::HleTrap: {
             if (m_imports && m_kernel) {
@@ -1561,12 +1936,18 @@ bool Interpreter::Step() {
         }
 
         case OpcodeType::Imul: {
-            if (inst.op2.kind != Operand::Kind::None) {
+            if (inst.op3.kind != Operand::Kind::None) {
+                // 3-operand IMUL reg, r/m, imm
+                s64 src = static_cast<s64>(ReadOperand(inst.op2, inst.length));
+                s64 imm = static_cast<s64>(inst.op3.imm);
+                s64 res = src * imm;
+                WriteOperand(inst.op1, static_cast<u64>(res), inst.length, inst.hasRex);
+            } else if (inst.op2.kind != Operand::Kind::None) {
                 // 2-operand IMUL reg, r/m
-                u64 dst = ReadOperand(inst.op1, inst.length);
-                u64 src = ReadOperand(inst.op2, inst.length);
-                u64 res = dst * src;
-                WriteOperand(inst.op1, res, inst.length, inst.hasRex);
+                s64 dst = static_cast<s64>(ReadOperand(inst.op1, inst.length));
+                s64 src = static_cast<s64>(ReadOperand(inst.op2, inst.length));
+                s64 res = dst * src;
+                WriteOperand(inst.op1, static_cast<u64>(res), inst.length, inst.hasRex);
             } else {
                 // 1-operand IMUL r/m
                 s64 src = static_cast<s64>(ReadOperand(inst.op1, inst.length));
@@ -1617,7 +1998,7 @@ bool Interpreter::Step() {
             u64 dst = ReadOperand(inst.op1, inst.length);
             u64 res = dst + 1;
             WriteOperand(inst.op1, res, inst.length, inst.hasRex);
-            UpdateFlagsArithmetic(res, dst, 1, inst.op1.size, false);
+            UpdateFlagsArithmetic(res, dst, 1, inst.op1.size, false, false);
             break;
         }
 
@@ -1625,7 +2006,7 @@ bool Interpreter::Step() {
             u64 dst = ReadOperand(inst.op1, inst.length);
             u64 res = dst - 1;
             WriteOperand(inst.op1, res, inst.length, inst.hasRex);
-            UpdateFlagsArithmetic(res, dst, 1, inst.op1.size, true);
+            UpdateFlagsArithmetic(res, dst, 1, inst.op1.size, true, false);
             break;
         }
 
@@ -1720,6 +2101,38 @@ bool Interpreter::Step() {
             break;
         }
 
+        case OpcodeType::Cmpxchg16b: {
+            u64 addr = inst.op1.GetAddress(m_ctx, m_ctx.rip);
+            u64 memLow = m_memory.Read<u64>(addr);
+            u64 memHigh = m_memory.Read<u64>(addr + 8);
+            if (memLow == m_ctx.rax && memHigh == m_ctx.rdx) {
+                m_ctx.rflags |= 0x040; // ZF = 1
+                m_memory.Write<u64>(addr, m_ctx.rbx);
+                m_memory.Write<u64>(addr + 8, m_ctx.rcx);
+            } else {
+                m_ctx.rflags &= ~0x040; // ZF = 0
+                m_ctx.rax = memLow;
+                m_ctx.rdx = memHigh;
+            }
+            break;
+        }
+
+        case OpcodeType::Cmpxchg8b: {
+            u64 addr = inst.op1.GetAddress(m_ctx, m_ctx.rip);
+            u32 memLow = m_memory.Read<u32>(addr);
+            u32 memHigh = m_memory.Read<u32>(addr + 4);
+            if (memLow == static_cast<u32>(m_ctx.rax) && memHigh == static_cast<u32>(m_ctx.rdx)) {
+                m_ctx.rflags |= 0x040; // ZF = 1
+                m_memory.Write<u32>(addr, static_cast<u32>(m_ctx.rbx));
+                m_memory.Write<u32>(addr + 4, static_cast<u32>(m_ctx.rcx));
+            } else {
+                m_ctx.rflags &= ~0x040; // ZF = 0
+                m_ctx.rax = (m_ctx.rax & ~0xFFFFFFFFULL) | memLow;
+                m_ctx.rdx = (m_ctx.rdx & ~0xFFFFFFFFULL) | memHigh;
+            }
+            break;
+        }
+
         case OpcodeType::Cmov: {
             if (CheckCondition(inst.conditionCode, m_ctx.rflags)) {
                 u64 val = ReadOperand(inst.op2, inst.length);
@@ -1731,6 +2144,39 @@ bool Interpreter::Step() {
         case OpcodeType::Setcc: {
             u64 val = CheckCondition(inst.conditionCode, m_ctx.rflags) ? 1 : 0;
             WriteOperand(inst.op1, val, inst.length, inst.hasRex);
+            break;
+        }
+
+        case OpcodeType::Bsf: {
+            u64 src = ReadOperand(inst.op2, inst.length);
+            if (src == 0) {
+                m_ctx.rflags |= 0x040; // ZF = 1
+            } else {
+                m_ctx.rflags &= ~0x040; // ZF = 0
+                u64 idx = __builtin_ctzll(src);
+                WriteOperand(inst.op1, idx, inst.length, inst.hasRex);
+            }
+            break;
+        }
+
+        case OpcodeType::Bsr: {
+            u64 src = ReadOperand(inst.op2, inst.length);
+            if (src == 0) {
+                m_ctx.rflags |= 0x040; // ZF = 1
+            } else {
+                m_ctx.rflags &= ~0x040; // ZF = 0
+                u64 idx = (inst.op2.size == 8) ? (63 - __builtin_clzll(src)) : (31 - __builtin_clz(static_cast<u32>(src)));
+                WriteOperand(inst.op1, idx, inst.length, inst.hasRex);
+            }
+            break;
+        }
+
+        case OpcodeType::Popcnt: {
+            u64 src = ReadOperand(inst.op2, inst.length);
+            u64 count = (inst.op2.size == 8) ? __builtin_popcountll(src) : __builtin_popcount(static_cast<u32>(src));
+            m_ctx.rflags &= ~0x8FF;
+            if (count == 0) m_ctx.rflags |= 0x040;
+            WriteOperand(inst.op1, count, inst.length, inst.hasRex);
             break;
         }
 
@@ -1952,6 +2398,186 @@ bool Interpreter::Step() {
             break;
         }
 
+        case OpcodeType::Addss:
+        case OpcodeType::Subss:
+        case OpcodeType::Mulss:
+        case OpcodeType::Divss:
+        case OpcodeType::Rsqrtss:
+        case OpcodeType::Rcpss:
+        case OpcodeType::Sqrtss: {
+            u8 dstReg = inst.op1.reg;
+            float v1 = 0.0f;
+            std::memcpy(&v1, &m_ctx.ymm[dstReg].qwords[0], sizeof(float));
+            float v2 = 0.0f;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u32 raw = m_memory.Read<u32>(addr);
+                std::memcpy(&v2, &raw, sizeof(float));
+            } else {
+                std::memcpy(&v2, &m_ctx.ymm[inst.op2.reg].qwords[0], sizeof(float));
+            }
+            float res = 0.0f;
+            if (inst.type == OpcodeType::Addss) res = v1 + v2;
+            else if (inst.type == OpcodeType::Subss) res = v1 - v2;
+            else if (inst.type == OpcodeType::Mulss) res = v1 * v2;
+            else if (inst.type == OpcodeType::Divss) res = (v2 != 0.0f) ? (v1 / v2) : 0.0f;
+            else if (inst.type == OpcodeType::Sqrtss) res = (v2 >= 0.0f) ? std::sqrt(v2) : 0.0f;
+            else if (inst.type == OpcodeType::Rsqrtss) res = (v2 > 0.0f) ? (1.0f / std::sqrt(v2)) : 0.0f;
+            else if (inst.type == OpcodeType::Rcpss) res = (v2 != 0.0f) ? (1.0f / v2) : 0.0f;
+            u32 resRaw = 0;
+            std::memcpy(&resRaw, &res, sizeof(float));
+            m_ctx.ymm[dstReg].qwords[0] = (m_ctx.ymm[dstReg].qwords[0] & 0xFFFFFFFF00000000ULL) | resRaw;
+            break;
+        }
+
+        case OpcodeType::Addps:
+        case OpcodeType::Subps:
+        case OpcodeType::Mulps:
+        case OpcodeType::Divps:
+        case OpcodeType::Sqrtps:
+        case OpcodeType::Rsqrtps:
+        case OpcodeType::Rcpps: {
+            u8 dstReg = inst.op1.reg;
+            float src[4] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u64 q0 = m_memory.Read<u64>(addr);
+                u64 q1 = m_memory.Read<u64>(addr + 8);
+                std::memcpy(&src[0], &q0, 8);
+                std::memcpy(&src[2], &q1, 8);
+            } else {
+                std::memcpy(&src[0], &m_ctx.ymm[inst.op2.reg].qwords[0], 8);
+                std::memcpy(&src[2], &m_ctx.ymm[inst.op2.reg].qwords[1], 8);
+            }
+            float dst[4] = {0};
+            std::memcpy(&dst[0], &m_ctx.ymm[dstReg].qwords[0], 8);
+            std::memcpy(&dst[2], &m_ctx.ymm[dstReg].qwords[1], 8);
+            for (int i = 0; i < 4; i++) {
+                if (inst.type == OpcodeType::Addps) dst[i] += src[i];
+                else if (inst.type == OpcodeType::Subps) dst[i] -= src[i];
+                else if (inst.type == OpcodeType::Mulps) dst[i] *= src[i];
+                else if (inst.type == OpcodeType::Divps) dst[i] = (src[i] != 0.0f) ? (dst[i] / src[i]) : 0.0f;
+                else if (inst.type == OpcodeType::Sqrtps) dst[i] = (src[i] >= 0.0f) ? std::sqrt(src[i]) : 0.0f;
+                else if (inst.type == OpcodeType::Rsqrtps) dst[i] = (src[i] > 0.0f) ? (1.0f / std::sqrt(src[i])) : 0.0f;
+                else if (inst.type == OpcodeType::Rcpps) dst[i] = (src[i] != 0.0f) ? (1.0f / src[i]) : 0.0f;
+            }
+            std::memcpy(&m_ctx.ymm[dstReg].qwords[0], &dst[0], 8);
+            std::memcpy(&m_ctx.ymm[dstReg].qwords[1], &dst[2], 8);
+            break;
+        }
+
+        case OpcodeType::Addpd:
+        case OpcodeType::Subpd:
+        case OpcodeType::Mulpd:
+        case OpcodeType::Divpd: {
+            u8 dstReg = inst.op1.reg;
+            double src[2] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u64 q0 = m_memory.Read<u64>(addr);
+                u64 q1 = m_memory.Read<u64>(addr + 8);
+                src[0] = *reinterpret_cast<double*>(&q0);
+                src[1] = *reinterpret_cast<double*>(&q1);
+            } else {
+                src[0] = *reinterpret_cast<double*>(&m_ctx.ymm[inst.op2.reg].qwords[0]);
+                src[1] = *reinterpret_cast<double*>(&m_ctx.ymm[inst.op2.reg].qwords[1]);
+            }
+            double dst[2] = {
+                *reinterpret_cast<double*>(&m_ctx.ymm[dstReg].qwords[0]),
+                *reinterpret_cast<double*>(&m_ctx.ymm[dstReg].qwords[1])
+            };
+            for (int i = 0; i < 2; i++) {
+                if (inst.type == OpcodeType::Addpd) dst[i] += src[i];
+                else if (inst.type == OpcodeType::Subpd) dst[i] -= src[i];
+                else if (inst.type == OpcodeType::Mulpd) dst[i] *= src[i];
+                else if (inst.type == OpcodeType::Divpd) dst[i] = (src[i] != 0.0) ? (dst[i] / src[i]) : 0.0;
+            }
+            m_ctx.ymm[dstReg].qwords[0] = *reinterpret_cast<u64*>(&dst[0]);
+            m_ctx.ymm[dstReg].qwords[1] = *reinterpret_cast<u64*>(&dst[1]);
+            break;
+        }
+
+        case OpcodeType::Andnps: {
+            u8 dstReg = inst.op1.reg;
+            u64 src0 = 0, src1 = 0;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 srcAddr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                src0 = m_memory.Read<u64>(srcAddr);
+                src1 = m_memory.Read<u64>(srcAddr + 8);
+            } else {
+                u8 srcReg = inst.op2.reg;
+                src0 = m_ctx.ymm[srcReg].qwords[0];
+                src1 = m_ctx.ymm[srcReg].qwords[1];
+            }
+            m_ctx.ymm[dstReg].qwords[0] = (~m_ctx.ymm[dstReg].qwords[0]) & src0;
+            m_ctx.ymm[dstReg].qwords[1] = (~m_ctx.ymm[dstReg].qwords[1]) & src1;
+            break;
+        }
+
+        case OpcodeType::Movmskps: {
+            u8 srcReg = inst.op2.reg;
+            u32 raw[4];
+            std::memcpy(&raw[0], &m_ctx.ymm[srcReg].qwords[0], 8);
+            std::memcpy(&raw[2], &m_ctx.ymm[srcReg].qwords[1], 8);
+            u32 mask = 0;
+            for (int i = 0; i < 4; i++) {
+                if (raw[i] & 0x80000000U) {
+                    mask |= (1U << i);
+                }
+            }
+            WriteOperand(inst.op1, mask, inst.length, inst.hasRex);
+            break;
+        }
+
+        case OpcodeType::Cvtsd2ss: {
+            u8 dstReg = inst.op1.reg;
+            double dVal = 0.0;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u64 raw = m_memory.Read<u64>(addr);
+                std::memcpy(&dVal, &raw, sizeof(double));
+            } else {
+                std::memcpy(&dVal, &m_ctx.ymm[inst.op2.reg].qwords[0], sizeof(double));
+            }
+            float fVal = static_cast<float>(dVal);
+            u32 fRaw = 0;
+            std::memcpy(&fRaw, &fVal, sizeof(float));
+            m_ctx.ymm[dstReg].qwords[0] = (m_ctx.ymm[dstReg].qwords[0] & 0xFFFFFFFF00000000ULL) | fRaw;
+            break;
+        }
+
+        case OpcodeType::Cvtss2sd: {
+            u8 dstReg = inst.op1.reg;
+            float fVal = 0.0f;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u32 raw = m_memory.Read<u32>(addr);
+                std::memcpy(&fVal, &raw, sizeof(float));
+            } else {
+                std::memcpy(&fVal, &m_ctx.ymm[inst.op2.reg].qwords[0], sizeof(float));
+            }
+            double dVal = static_cast<double>(fVal);
+            u64 dRaw = 0;
+            std::memcpy(&dRaw, &dVal, sizeof(double));
+            m_ctx.ymm[dstReg].qwords[0] = dRaw;
+            break;
+        }
+
+        case OpcodeType::Sqrtsd: {
+            u8 dstReg = inst.op1.reg;
+            double val = 0.0;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u64 raw = m_memory.Read<u64>(addr);
+                val = *reinterpret_cast<double*>(&raw);
+            } else {
+                val = *reinterpret_cast<double*>(&m_ctx.ymm[inst.op2.reg].qwords[0]);
+            }
+            double res = std::sqrt(val);
+            *reinterpret_cast<double*>(&m_ctx.ymm[dstReg].qwords[0]) = res;
+            break;
+        }
+
         case OpcodeType::Comisd: {
             u8 dstReg = inst.op1.reg;
             double v1 = *reinterpret_cast<const double*>(&m_ctx.ymm[dstReg].qwords[0]);
@@ -1987,6 +2613,21 @@ bool Interpreter::Step() {
             break;
         }
 
+        case OpcodeType::Cvtsi2ss: {
+            u8 dstReg = inst.op1.reg;
+            s64 intVal = 0;
+            if (inst.op2.size == 8) {
+                intVal = static_cast<s64>(ReadOperand(inst.op2, inst.length));
+            } else {
+                intVal = static_cast<s32>(ReadOperand(inst.op2, inst.length));
+            }
+            float fVal = static_cast<float>(intVal);
+            u32 fRaw = 0;
+            std::memcpy(&fRaw, &fVal, sizeof(float));
+            m_ctx.ymm[dstReg].qwords[0] = (m_ctx.ymm[dstReg].qwords[0] & 0xFFFFFFFF00000000ULL) | fRaw;
+            break;
+        }
+
         case OpcodeType::Cvtsd2si: {
             double dVal = 0.0;
             if (inst.op2.kind == Operand::Kind::Memory) {
@@ -2002,6 +2643,55 @@ bool Interpreter::Step() {
             } else {
                 s32 intVal = static_cast<s32>(std::round(dVal));
                 WriteOperand(inst.op1, static_cast<u32>(intVal), inst.length, inst.hasRex);
+            }
+            break;
+        }
+
+        case OpcodeType::Cvttsd2si: {
+            double dVal = 0.0;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u64 raw = m_memory.Read<u64>(addr);
+                dVal = *reinterpret_cast<double*>(&raw);
+            } else {
+                dVal = *reinterpret_cast<double*>(&m_ctx.ymm[inst.op2.reg].qwords[0]);
+            }
+            if (inst.op1.size == 8) {
+                s64 intVal = static_cast<s64>(dVal);
+                WriteOperand(inst.op1, static_cast<u64>(intVal), inst.length, inst.hasRex);
+            } else {
+                s32 intVal = static_cast<s32>(dVal);
+                WriteOperand(inst.op1, static_cast<u32>(intVal), inst.length, inst.hasRex);
+            }
+            break;
+        }
+
+        case OpcodeType::Cvtss2si:
+        case OpcodeType::Cvttss2si: {
+            float fVal = 0.0f;
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                u32 raw = m_memory.Read<u32>(addr);
+                std::memcpy(&fVal, &raw, sizeof(float));
+            } else {
+                std::memcpy(&fVal, &m_ctx.ymm[inst.op2.reg].qwords[0], sizeof(float));
+            }
+            if (inst.type == OpcodeType::Cvttss2si) {
+                if (inst.op1.size == 8) {
+                    s64 intVal = static_cast<s64>(fVal);
+                    WriteOperand(inst.op1, static_cast<u64>(intVal), inst.length, inst.hasRex);
+                } else {
+                    s32 intVal = static_cast<s32>(fVal);
+                    WriteOperand(inst.op1, static_cast<u32>(intVal), inst.length, inst.hasRex);
+                }
+            } else {
+                if (inst.op1.size == 8) {
+                    s64 intVal = static_cast<s64>(std::round(fVal));
+                    WriteOperand(inst.op1, static_cast<u64>(intVal), inst.length, inst.hasRex);
+                } else {
+                    s32 intVal = static_cast<s32>(std::round(fVal));
+                    WriteOperand(inst.op1, static_cast<u32>(intVal), inst.length, inst.hasRex);
+                }
             }
             break;
         }
@@ -2096,6 +2786,231 @@ bool Interpreter::Step() {
             }
             m_ctx.ymm[dstReg].qwords[0] = *reinterpret_cast<u64*>(&dst[0]);
             m_ctx.ymm[dstReg].qwords[1] = *reinterpret_cast<u64*>(&dst[2]);
+            break;
+        }
+
+        case OpcodeType::Unpcklps: {
+            u8 dstReg = inst.op1.reg;
+            u32 src32[4] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, src32, 16);
+            } else {
+                std::memcpy(src32, &m_ctx.ymm[inst.op2.reg], 16);
+            }
+            u32* dst32 = reinterpret_cast<u32*>(&m_ctx.ymm[dstReg]);
+            u32 d0 = dst32[0];
+            u32 d1 = dst32[1];
+            dst32[0] = d0;
+            dst32[1] = src32[0];
+            dst32[2] = d1;
+            dst32[3] = src32[1];
+            m_ctx.ymm[dstReg].qwords[2] = 0;
+            m_ctx.ymm[dstReg].qwords[3] = 0;
+            break;
+        }
+
+        case OpcodeType::Vzeroupper:
+            break;
+
+        case OpcodeType::Vpxor: {
+            u8 dstReg = inst.op1.reg;
+            u8 src1Reg = inst.op3.reg;
+            u8 vecSize = (inst.opSize == 32) ? 32 : 16;
+            u8 src2Bytes[32] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, src2Bytes, vecSize);
+            } else {
+                std::memcpy(src2Bytes, &m_ctx.ymm[inst.op2.reg], vecSize);
+            }
+            const u8* src1Bytes = reinterpret_cast<const u8*>(&m_ctx.ymm[src1Reg]);
+            u8* dstBytes = reinterpret_cast<u8*>(&m_ctx.ymm[dstReg]);
+            for (int i = 0; i < vecSize; i++) {
+                dstBytes[i] = src1Bytes[i] ^ src2Bytes[i];
+            }
+            if (vecSize == 16) {
+                m_ctx.ymm[dstReg].qwords[2] = 0;
+                m_ctx.ymm[dstReg].qwords[3] = 0;
+            }
+            break;
+        }
+
+        case OpcodeType::Vpcmpeqb: {
+            u8 dstReg = inst.op1.reg;
+            u8 src1Reg = inst.op3.reg;
+            u8 vecSize = (inst.opSize == 32) ? 32 : 16;
+            u8 src2Bytes[32] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, src2Bytes, vecSize);
+            } else {
+                std::memcpy(src2Bytes, &m_ctx.ymm[inst.op2.reg], vecSize);
+            }
+            const u8* src1Bytes = reinterpret_cast<const u8*>(&m_ctx.ymm[src1Reg]);
+            u8* dstBytes = reinterpret_cast<u8*>(&m_ctx.ymm[dstReg]);
+            for (int i = 0; i < vecSize; i++) {
+                dstBytes[i] = (src1Bytes[i] == src2Bytes[i]) ? 0xFF : 0x00;
+            }
+            if (vecSize == 16) {
+                m_ctx.ymm[dstReg].qwords[2] = 0;
+                m_ctx.ymm[dstReg].qwords[3] = 0;
+            }
+            break;
+        }
+
+        case OpcodeType::Vpcmpeqw: {
+            u8 dstReg = inst.op1.reg;
+            u8 src1Reg = inst.op3.reg;
+            u8 vecSize = (inst.opSize == 32) ? 32 : 16;
+            u16 src2Words[16] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, src2Words, vecSize);
+            } else {
+                std::memcpy(src2Words, &m_ctx.ymm[inst.op2.reg], vecSize);
+            }
+            const u16* src1Words = reinterpret_cast<const u16*>(&m_ctx.ymm[src1Reg]);
+            u16* dstWords = reinterpret_cast<u16*>(&m_ctx.ymm[dstReg]);
+            int count = vecSize / 2;
+            for (int i = 0; i < count; i++) {
+                dstWords[i] = (src1Words[i] == src2Words[i]) ? 0xFFFF : 0x0000;
+            }
+            if (vecSize == 16) {
+                m_ctx.ymm[dstReg].qwords[2] = 0;
+                m_ctx.ymm[dstReg].qwords[3] = 0;
+            }
+            break;
+        }
+
+        case OpcodeType::Vpcmpeqd: {
+            u8 dstReg = inst.op1.reg;
+            u8 src1Reg = inst.op3.reg;
+            u8 vecSize = (inst.opSize == 32) ? 32 : 16;
+            u32 src2Dwords[8] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, src2Dwords, vecSize);
+            } else {
+                std::memcpy(src2Dwords, &m_ctx.ymm[inst.op2.reg], vecSize);
+            }
+            const u32* src1Dwords = reinterpret_cast<const u32*>(&m_ctx.ymm[src1Reg]);
+            u32* dstDwords = reinterpret_cast<u32*>(&m_ctx.ymm[dstReg]);
+            int count = vecSize / 4;
+            for (int i = 0; i < count; i++) {
+                dstDwords[i] = (src1Dwords[i] == src2Dwords[i]) ? 0xFFFFFFFF : 0x00000000;
+            }
+            if (vecSize == 16) {
+                m_ctx.ymm[dstReg].qwords[2] = 0;
+                m_ctx.ymm[dstReg].qwords[3] = 0;
+            }
+            break;
+        }
+
+        case OpcodeType::Vmovdqa:
+        case OpcodeType::Vmovdqu: {
+            u8 vecSize = (inst.opSize == 32) ? 32 : 16;
+            if (inst.op1.kind == Operand::Kind::Register && inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, &m_ctx.ymm[inst.op1.reg], vecSize);
+                if (vecSize == 16) {
+                    m_ctx.ymm[inst.op1.reg].qwords[2] = 0;
+                    m_ctx.ymm[inst.op1.reg].qwords[3] = 0;
+                }
+            } else if (inst.op1.kind == Operand::Kind::Memory && inst.op2.kind == Operand::Kind::Register) {
+                u64 addr = inst.op1.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.WriteBytes(addr, &m_ctx.ymm[inst.op2.reg], vecSize);
+            } else if (inst.op1.kind == Operand::Kind::Register && inst.op2.kind == Operand::Kind::Register) {
+                std::memcpy(&m_ctx.ymm[inst.op1.reg], &m_ctx.ymm[inst.op2.reg], vecSize);
+                if (vecSize == 16) {
+                    m_ctx.ymm[inst.op1.reg].qwords[2] = 0;
+                    m_ctx.ymm[inst.op1.reg].qwords[3] = 0;
+                }
+            }
+            break;
+        }
+
+        case OpcodeType::Pcmpistri: {
+            u8 imm = static_cast<u8>(inst.op3.imm);
+            u16 srcWords[8] = {0};
+            u16 dstWords[8] = {0};
+            if (inst.op2.kind == Operand::Kind::Memory) {
+                u64 addr = inst.op2.GetAddress(m_ctx, m_ctx.rip);
+                m_memory.ReadBytes(addr, srcWords, 16);
+            } else {
+                std::memcpy(srcWords, &m_ctx.ymm[inst.op2.reg], 16);
+            }
+            std::memcpy(dstWords, &m_ctx.ymm[inst.op1.reg], 16);
+
+            int lenSrc = 8;
+            for (int i = 0; i < 8; i++) {
+                if (srcWords[i] == 0) { lenSrc = i; break; }
+            }
+            int lenDst = 8;
+            for (int i = 0; i < 8; i++) {
+                if (dstWords[i] == 0) { lenDst = i; break; }
+            }
+
+            u8 mode = (imm >> 2) & 3;
+            u8 intRes1 = 0;
+
+            if (mode == 0) { // Equal any
+                for (int i = 0; i < lenSrc; i++) {
+                    for (int j = 0; j < lenDst; j++) {
+                        if (srcWords[i] == dstWords[j]) {
+                            intRes1 |= (1 << i);
+                            break;
+                        }
+                    }
+                }
+            } else if (mode == 2) { // Equal each
+                for (int i = 0; i < 8; i++) {
+                    if (i < lenSrc && i < lenDst && srcWords[i] == dstWords[i]) {
+                        intRes1 |= (1 << i);
+                    }
+                }
+            } else if (mode == 3) { // Equal ordered / Substring search
+                for (int i = 0; i < 8; i++) {
+                    bool match = true;
+                    for (int k = 0; k < lenDst; k++) {
+                        if (i + k >= 8) {
+                            if (i + k >= lenSrc) match = false;
+                            break;
+                        }
+                        if (i + k >= lenSrc || srcWords[i + k] != dstWords[k]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match && lenDst > 0) intRes1 |= (1 << i);
+                }
+            }
+
+            // Polarity
+            u8 intRes2 = intRes1;
+            if (((imm >> 4) & 3) == 1) {
+                intRes2 = ~intRes1 & ((1 << lenSrc) - 1);
+            }
+
+            // Index in ECX
+            int index = 8;
+            if ((imm & 0x40) == 0) {
+                for (int i = 0; i < 8; i++) {
+                    if (intRes2 & (1 << i)) { index = i; break; }
+                }
+            } else {
+                for (int i = 7; i >= 0; i--) {
+                    if (intRes2 & (1 << i)) { index = i; break; }
+                }
+            }
+            m_ctx.rcx = static_cast<u64>(index);
+
+            // Flags
+            if (intRes2 != 0) m_ctx.rflags |= 0x001; else m_ctx.rflags &= ~0x001; // CF
+            if (lenSrc < 8) m_ctx.rflags |= 0x040; else m_ctx.rflags &= ~0x040;   // ZF
+            if (lenDst < 8) m_ctx.rflags |= 0x080; else m_ctx.rflags &= ~0x080;   // SF
+            if (intRes2 & 1) m_ctx.rflags |= 0x800; else m_ctx.rflags &= ~0x800;  // OF
+            m_ctx.rflags &= ~0x014; // AF, PF
             break;
         }
 

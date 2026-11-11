@@ -5,8 +5,7 @@
 namespace Scarlett::Modules {
 
 void RegisterD3D12X(HleKernel& kernel) {
-    // D3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid, void** ppDevice)
-    kernel.RegisterHook("d3d12_x.dll", "D3D12CreateDevice", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+    auto createDeviceHandler = [](CpuContext& ctx, MemoryManager& mem) -> u64 {
         GuestAddr pAdapter = ctx.rcx;
         u32 featureLevel = static_cast<u32>(ctx.rdx);
         GuestAddr riid = ctx.r8;
@@ -31,13 +30,32 @@ void RegisterD3D12X(HleKernel& kernel) {
         }
 
         return 0; // S_OK
-    });
+    };
+
+    kernel.RegisterHook("d3d12_x.dll", "D3D12CreateDevice", createDeviceHandler);
+    kernel.RegisterHook("d3d12.dll", "D3D12CreateDevice", createDeviceHandler);
 
     // D3D12GetDebugInterface
-    kernel.RegisterHook("d3d12_x.dll", "D3D12GetDebugInterface", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+    auto debugInterfaceHandler = [](CpuContext& ctx, MemoryManager& mem) -> u64 {
         LOG_INFO("D3D12X", "D3D12GetDebugInterface stubbed (Returning S_OK)");
         return 0; // S_OK
-    });
+    };
+    kernel.RegisterHook("d3d12_x.dll", "D3D12GetDebugInterface", debugInterfaceHandler);
+    kernel.RegisterHook("d3d12.dll", "D3D12GetDebugInterface", debugInterfaceHandler);
+
+    // DXGI Factory
+    auto createDxgiFactoryHandler = [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr ppFactory = ctx.rdx ? ctx.rdx : ctx.rcx;
+        if (ppFactory) {
+            GuestAddr mockFactory = mem.Allocate(0x1000, MemoryProtection::ReadWrite);
+            mem.Write<GuestAddr>(ppFactory, mockFactory);
+            LOG_INFO("DXGI", "Bridged DXGI Factory allocated at 0x" + std::to_string(mockFactory));
+        }
+        return 0; // S_OK
+    };
+    kernel.RegisterHook("dxgi.dll", "CreateDXGIFactory", createDxgiFactoryHandler);
+    kernel.RegisterHook("dxgi.dll", "CreateDXGIFactory1", createDxgiFactoryHandler);
+    kernel.RegisterHook("dxgi.dll", "CreateDXGIFactory2", createDxgiFactoryHandler);
 }
 
 } // namespace Scarlett::Modules
