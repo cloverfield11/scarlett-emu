@@ -104,6 +104,18 @@ int main(int argc, char* argv[]) {
     std::string binaryPath = arg;
     LOG_INFO("Core", "Loading Scarlett target binary: " + binaryPath);
 
+    // Check for accompanying MicrosoftGameConfig.mgc or MicrosoftGame.config
+    size_t lastSlash = binaryPath.find_last_of("/\\");
+    std::string dirPath = (lastSlash != std::string::npos) ? binaryPath.substr(0, lastSlash) : ".";
+    std::string configPath = dirPath + "/MicrosoftGameConfig.mgc";
+    if (access(configPath.c_str(), F_OK) != 0) {
+        configPath = dirPath + "/MicrosoftGame.config";
+    }
+    if (access(configPath.c_str(), F_OK) == 0) {
+        LOG_INFO("Core", "Found Xbox Game Configuration: " + configPath);
+        Scarlett::PackageManifest::LoadFromFile(configPath);
+    }
+
     Scarlett::PeLoader loader(memory);
     if (!loader.LoadExecutable(binaryPath)) {
         LOG_ERROR("Core", "Failed to load binary into memory!");
