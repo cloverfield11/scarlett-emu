@@ -1,11 +1,13 @@
 #pragma once
 
 #include "common/types.h"
+#include "common/logging.h"
 #include <vector>
 #include <memory>
 #include <unordered_map>
 #include <map>
 #include <mutex>
+#include <sstream>
 
 namespace Scarlett {
 

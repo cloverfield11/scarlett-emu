@@ -42,6 +42,15 @@ struct ImageImportDescriptor {
     u32 name;
     u32 firstThunk;
 };
+
+struct ImageTlsDirectory64 {
+    u64 startAddressOfRawData;
+    u64 endAddressOfRawData;
+    u64 addressOfIndex;
+    u64 addressOfCallBacks;
+    u32 sizeOfZeroFill;
+    u32 characteristics;
+};
 #pragma pack(pop)
 
 PeLoader::PeLoader(MemoryManager& memory) : m_memory(memory) {}
@@ -90,6 +99,9 @@ bool PeLoader::LoadModule(const std::string& filePath, LoadedModule* outModule) 
 
     // Register module so subsequent imports can resolve against it
     m_modules.push_back(module);
+
+    // Parse TLS directory
+    ParseTls(buffer, m_modules.back());
 
     // Now parse imports for this module
     if (!ParseImports(buffer, m_modules.back())) return false;
@@ -386,7 +398,43 @@ bool PeLoader::ParseImports(const std::vector<u8>& rawData, LoadedModule& module
             GuestAddr targetAddr = 0;
             u32 hookId = 0;
 
-            if (exportAddr != 0) {
+            if (funcName == "_initterm") {
+                if (m_inittermAddr == 0) {
+                    m_inittermAddr = m_trampolinePool + m_trampolineOffset;
+                    static const u8 s_initterm_code[] = {
+                        0x56, 0x57, 0x48, 0x83, 0xec, 0x28, 0x48, 0x39, 0xd1, 0x73, 0x2a, 0x48, 0x89, 0xd6, 
+                        0x48, 0x89, 0xcf, 0xeb, 0x16, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 
+                        0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc7, 0x08, 0x48, 0x39, 0xf7, 0x73, 0x0c, 0x48, 
+                        0x8b, 0x07, 0x48, 0x85, 0xc0, 0x74, 0xef, 0xff, 0xd0, 0xeb, 0xeb, 0x48, 0x83, 0xc4, 
+                        0x28, 0x5f, 0x5e, 0xc3
+                    };
+                    m_memory.WriteBytes(m_inittermAddr, s_initterm_code, sizeof(s_initterm_code));
+                    m_trampolineOffset += 64;
+                }
+                targetAddr = m_inittermAddr;
+                std::stringstream ss;
+                ss << "    [IAT 0x" << std::hex << iatEntryAddr << "] -> " << dllName << "!" << funcName
+                   << " (Native guest loop at 0x" << targetAddr << ")";
+                LOG_INFO("Loader", ss.str());
+            } else if (funcName == "_initterm_e") {
+                if (m_inittermEAddr == 0) {
+                    m_inittermEAddr = m_trampolinePool + m_trampolineOffset;
+                    static const u8 s_initterm_e_code[] = {
+                        0x56, 0x57, 0x53, 0x48, 0x83, 0xec, 0x20, 0x31, 0xf6, 0x48, 0x39, 0xd1, 0x73, 0x2b, 
+                        0x48, 0x89, 0xd7, 0x48, 0x89, 0xcb, 0xeb, 0x13, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 
+                        0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc3, 0x08, 0x48, 0x39, 0xfb, 0x73, 0x10, 0x48, 
+                        0x8b, 0x03, 0x48, 0x85, 0xc0, 0x74, 0xef, 0xff, 0xd0, 0x85, 0xc0, 0x74, 0xe9, 0x89, 
+                        0xc6, 0x89, 0xf0, 0x48, 0x83, 0xc4, 0x20, 0x5b, 0x5f, 0x5e, 0xc3
+                    };
+                    m_memory.WriteBytes(m_inittermEAddr, s_initterm_e_code, sizeof(s_initterm_e_code));
+                    m_trampolineOffset += 80;
+                }
+                targetAddr = m_inittermEAddr;
+                std::stringstream ss;
+                ss << "    [IAT 0x" << std::hex << iatEntryAddr << "] -> " << dllName << "!" << funcName
+                   << " (Native guest loop at 0x" << targetAddr << ")";
+                LOG_INFO("Loader", ss.str());
+            } else if (exportAddr != 0) {
                 // Resolved directly to loaded module export!
                 targetAddr = exportAddr;
                 std::stringstream ss;
@@ -433,6 +481,35 @@ bool PeLoader::ParseImports(const std::vector<u8>& rawData, LoadedModule& module
 
     LOG_INFO("Loader", "Successfully resolved IAT imports for '" + module.name + 
              "'. Total imports tracked: " + std::to_string(m_imports.size()));
+    return true;
+}
+
+bool PeLoader::ParseTls(const std::vector<u8>& rawData, LoadedModule& module) {
+    const auto& tlsDir = module.optHeader.dataDirectory[9]; // IMAGE_DIRECTORY_ENTRY_TLS
+    if (tlsDir.virtualAddress == 0 || tlsDir.size == 0) {
+        return true;
+    }
+
+    GuestAddr tlsDirAddr = module.imageBase + tlsDir.virtualAddress;
+    ImageTlsDirectory64 tlsDesc{};
+    m_memory.ReadBytes(tlsDirAddr, &tlsDesc, sizeof(tlsDesc));
+
+    module.tlsRawStart = tlsDesc.startAddressOfRawData;
+    module.tlsRawEnd = tlsDesc.endAddressOfRawData;
+    module.tlsIndexAddr = tlsDesc.addressOfIndex;
+    module.tlsCallbacksAddr = tlsDesc.addressOfCallBacks;
+    module.tlsZeroFill = tlsDesc.sizeOfZeroFill;
+
+    LOG_INFO("Loader", "  ['" + module.name + "'] TLS Directory: Raw=0x" + 
+             std::to_string(module.tlsRawStart) + " - 0x" + std::to_string(module.tlsRawEnd) + 
+             ", IndexAddr=0x" + std::to_string(module.tlsIndexAddr) + 
+             ", CallbacksAddr=0x" + std::to_string(module.tlsCallbacksAddr));
+
+    if (module.tlsIndexAddr) {
+        // Set TLS index for this module (0 for main module)
+        m_memory.Write<u32>(module.tlsIndexAddr, 0);
+    }
+
     return true;
 }
 

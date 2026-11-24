@@ -48,14 +48,20 @@ struct GuestPeb {
 
 class EnvironmentManager {
 public:
-    static GuestAddr InitializeTebPeb(MemoryManager& memory, GuestAddr imageBase) {
+    static GuestAddr InitializeTebPeb(MemoryManager& memory, GuestAddr imageBase, GuestAddr tlsInitData = 0, u64 tlsInitSize = 0) {
         GuestAddr tebAddr = memory.Allocate(0x2000, MemoryProtection::ReadWrite, 0x160000000);
         GuestAddr pebAddr = tebAddr + 0x1000;
 
         // Allocate Thread Local Storage (TLS) array and module slots
         GuestAddr tlsArray = memory.Allocate(0x1000, MemoryProtection::ReadWrite, 0x160200000);
         for (int i = 0; i < 32; ++i) {
-            GuestAddr modTls = memory.Allocate(0x10000, MemoryProtection::ReadWrite);
+            GuestAddr modTls = memory.Allocate(0x20000, MemoryProtection::ReadWrite);
+            if (i == 0 && tlsInitData != 0 && tlsInitSize > 0) {
+                u64 copySize = std::min(tlsInitSize, static_cast<u64>(0x20000));
+                std::vector<u8> tlsBuf(copySize);
+                memory.ReadBytes(tlsInitData, tlsBuf.data(), copySize);
+                memory.WriteBytes(modTls, tlsBuf.data(), copySize);
+            }
             memory.Write<u64>(tlsArray + i * 8, modTls);
         }
 
@@ -79,12 +85,18 @@ public:
         return tebAddr;
     }
 
-    static GuestAddr CreateThreadTeb(MemoryManager& memory, GuestAddr mainTebAddr, GuestAddr stackBase, GuestAddr stackTop, u32 threadId) {
+    static GuestAddr CreateThreadTeb(MemoryManager& memory, GuestAddr mainTebAddr, GuestAddr stackBase, GuestAddr stackTop, u32 threadId, GuestAddr tlsInitData = 0, u64 tlsInitSize = 0) {
         GuestAddr tebAddr = memory.Allocate(0x1000, MemoryProtection::ReadWrite);
         GuestAddr pebAddr = mainTebAddr ? memory.Read<u64>(mainTebAddr + 0x60) : 0;
         GuestAddr tlsArray = memory.Allocate(0x1000, MemoryProtection::ReadWrite);
-        for (int i = 0; i < 16; ++i) {
-            GuestAddr modTls = memory.Allocate(0x10000, MemoryProtection::ReadWrite);
+        for (int i = 0; i < 32; ++i) {
+            GuestAddr modTls = memory.Allocate(0x20000, MemoryProtection::ReadWrite);
+            if (i == 0 && tlsInitData != 0 && tlsInitSize > 0) {
+                u64 copySize = std::min(tlsInitSize, static_cast<u64>(0x20000));
+                std::vector<u8> tlsBuf(copySize);
+                memory.ReadBytes(tlsInitData, tlsBuf.data(), copySize);
+                memory.WriteBytes(modTls, tlsBuf.data(), copySize);
+            }
             memory.Write<u64>(tlsArray + i * 8, modTls);
         }
 

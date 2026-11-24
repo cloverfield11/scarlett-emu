@@ -12,6 +12,8 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <algorithm>
+#include <random>
+#include <cmath>
 #include "gpu/metal_renderer.h"
 
 namespace Scarlett::Modules {
@@ -579,6 +581,8 @@ static bool PopulateFindData(MemoryManager& mem, GuestAddr lpFindFileData, const
 static GuestAddr s_cmdLineA = 0;
 static GuestAddr s_cmdLineW = 0;
 static GuestAddr s_envW = 0;
+static GuestAddr s_argcPtr = 0;
+static GuestAddr s_argvPtr = 0;
 static u32 s_lastErrorCode = 0;
 
 static void EnsureGlobalBuffers(MemoryManager& mem) {
@@ -589,6 +593,8 @@ static void EnsureGlobalBuffers(MemoryManager& mem) {
     s_cmdLineA = base;
     s_cmdLineW = base + 0x1000;
     s_envW = base + 0x2000;
+    s_argcPtr = base + 0x3000;
+    s_argvPtr = base + 0x3010;
 
     std::string cmd = "\"" + GetModuleWinPath(0) + "\"";
     mem.WriteBytes(s_cmdLineA, cmd.c_str(), cmd.size() + 1);
@@ -598,6 +604,12 @@ static void EnsureGlobalBuffers(MemoryManager& mem) {
     for (size_t i = 0; i < 14; ++i) {
         mem.Write<u16>(s_envW + i * 2, static_cast<u16>(env[i]));
     }
+
+    mem.Write<u32>(s_argcPtr, 1);
+    GuestAddr argvArray = base + 0x3020;
+    mem.Write<u64>(s_argvPtr, argvArray);
+    mem.Write<u64>(argvArray, s_cmdLineA);
+    mem.Write<u64>(argvArray + 8, 0);
 }
 
 void RegisterKernel32(HleKernel& kernel) {
@@ -1831,14 +1843,20 @@ void RegisterKernel32(HleKernel& kernel) {
                 "shell32.dll", "psapi.dll", "gdi32.dll", "winmm.dll",
                 "d3d11.dll", "d3d12.dll", "d3d12_x.dll", "dxgi.dll",
                 "shcore.dll", "dwmapi.dll", "ws2_32.dll", "userenv.dll",
-                "imm32.dll", "setupapi.dll", "hid.dll", "opengl32.dll", "dsound.dll"
+                "imm32.dll", "setupapi.dll", "hid.dll", "opengl32.dll", "dsound.dll",
+                "xgameruntime.dll", "xmem.dll", "ucrtbase.dll", "gameinput.dll"
             };
             for (const char* sm : searchMods) {
                 if (s_hleKernel->HasHook(sm, funcName)) {
                     GuestAddr tramp = s_hleKernel->GetOrCreateHookTrampoline(sm, funcName);
-                    LOG_INFO("Kernel32", "GetProcAddress: Resolved HLE hook '" + funcName + "' -> 0x" + std::to_string(tramp));
+                    LOG_INFO("Kernel32", "GetProcAddress: Resolved HLE hook '" + funcName + "' in '" + std::string(sm) + "' -> 0x" + std::to_string(tramp));
                     return tramp;
                 }
+            }
+            if (s_hleKernel->HasHook("", funcName)) {
+                GuestAddr tramp = s_hleKernel->GetOrCreateHookTrampoline("", funcName);
+                LOG_INFO("Kernel32", "GetProcAddress: Resolved HLE hook by global function name '" + funcName + "' -> 0x" + std::to_string(tramp));
+                return tramp;
             }
         }
 
@@ -2008,6 +2026,10 @@ void RegisterKernel32(HleKernel& kernel) {
         u64 handle = ctx.rcx;
         u32 dwMs = static_cast<u32>(ctx.rdx);
         u32 curTid = GetCurrentGuestThreadId();
+        if (handle == 0) {
+            s_lastErrorCode = 6; // ERROR_INVALID_HANDLE
+            return 0xFFFFFFFFULL; // WAIT_FAILED
+        }
         if (IsHandleSignaled(handle, curTid)) {
             if (!s_threads.empty() && s_activeThreadIdx < s_threads.size()) {
                 s_threads[s_activeThreadIdx].waiting = false;
@@ -2111,6 +2133,15 @@ void RegisterKernel32(HleKernel& kernel) {
         obj.count = static_cast<s32>(ctx.rdx);
         obj.maxCount = std::max<s32>(1, static_cast<s32>(ctx.r8));
         s_syncObjects[h] = obj;
+        std::stringstream ss;
+        u64 retRip = mem.Read<u64>(ctx.rsp);
+        u64 caller2 = mem.Read<u64>(ctx.rsp + 0x38);
+        ss << "CreateSemaphore: handle=0x" << std::hex << h << " init=" << std::dec << obj.count << " max=" << obj.maxCount
+           << " caller=0x" << std::hex << retRip << " parent=0x" << caller2;
+        if (h == 0x20b || h == 0x215) {
+            ss << " buckets_ptr=0x" << std::hex << mem.Read<u64>(0x1471c27e0);
+        }
+        LOG_INFO("Kernel", ss.str());
         return h;
     };
     kernel.RegisterHook("kernel32.dll", "CreateSemaphoreW", createSemHandler);
@@ -2151,6 +2182,56 @@ void RegisterKernel32(HleKernel& kernel) {
     });
     kernel.RegisterHook("kernel32.dll", "GetSystemInfo", [populateSysInfo](CpuContext& ctx, MemoryManager& mem) -> u64 {
         populateSysInfo(ctx.rcx, mem);
+        return 0;
+    });
+    kernel.RegisterHook("kernel32.dll", "GetLogicalProcessorInformation", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr pBuffer = ctx.rcx;
+        GuestAddr pLength = ctx.rdx;
+        // Return 8 cores info or false if buffer too small
+        // SYSTEM_LOGICAL_PROCESSOR_INFORMATION is 32 bytes
+        // 8 cores * 32 bytes = 256 bytes
+        u32 needed = 8 * 32;
+        if (!pLength) return 0;
+        u32 currentLen = mem.Read<u32>(pLength);
+        if (currentLen < needed || !pBuffer) {
+            mem.Write<u32>(pLength, needed);
+            return 0; // ERROR_INSUFFICIENT_BUFFER (122)
+        }
+        for (u32 i = 0; i < 8; i++) {
+            GuestAddr entry = pBuffer + i * 32;
+            mem.Write<u64>(entry + 0, 1ULL << i); // ProcessorMask
+            mem.Write<u32>(entry + 8, 3);          // Relationship: RelationProcessorCore
+            mem.Write<u8>(entry + 12, 0);          // Flags
+        }
+        mem.Write<u32>(pLength, needed);
+        return 1; // TRUE
+    });
+    kernel.RegisterHook("kernel32.dll", "GetThreadGroupAffinity", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr pGroupAffinity = ctx.rdx;
+        if (pGroupAffinity) {
+            mem.Write<u64>(pGroupAffinity + 0, 0xFF); // 8 cores mask
+            mem.Write<u16>(pGroupAffinity + 8, 0);    // Group 0
+            mem.Write<u16>(pGroupAffinity + 10, 0);
+            mem.Write<u32>(pGroupAffinity + 12, 0);
+        }
+        return 1; // TRUE
+    });
+    kernel.RegisterHook("kernel32.dll", "SetThreadGroupAffinity", [](CpuContext&, MemoryManager&) -> u64 {
+        return 1; // TRUE
+    });
+    kernel.RegisterHook("kernel32.dll", "SetProcessPriorityBoost", [](CpuContext&, MemoryManager&) -> u64 {
+        return 1; // TRUE
+    });
+    kernel.RegisterHook("kernel32.dll", "GetUserDefaultGeoName", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr pGeoName = ctx.rcx;
+        int cchGeoName = static_cast<int>(ctx.rdx);
+        if (pGeoName && cchGeoName >= 3) {
+            const char16_t name[] = u"US";
+            for (int i = 0; i < 3; i++) {
+                mem.Write<char16_t>(pGeoName + i * 2, name[i]);
+            }
+            return 2;
+        }
         return 0;
     });
 
@@ -2487,7 +2568,19 @@ void RegisterKernel32(HleKernel& kernel) {
         u32 tid = ++s_nextThreadId;
         u64 handle = ++s_handleCounter;
 
-        GuestAddr tebAddr = EnvironmentManager::CreateThreadTeb(mem, s_mainTebAddr, stackBase, stackTop, tid);
+        GuestAddr tlsInit = 0;
+        u64 tlsSize = 0;
+        if (s_peLoader) {
+            for (const auto& mod : s_peLoader->GetLoadedModules()) {
+                if (mod.tlsRawStart != 0 && mod.tlsRawEnd > mod.tlsRawStart) {
+                    tlsInit = mod.tlsRawStart;
+                    tlsSize = mod.tlsRawEnd - mod.tlsRawStart;
+                    break;
+                }
+            }
+        }
+
+        GuestAddr tebAddr = EnvironmentManager::CreateThreadTeb(mem, s_mainTebAddr, stackBase, stackTop, tid, tlsInit, tlsSize);
         if (!tebAddr) tebAddr = s_mainTebAddr;
 
         GuestThread t{};
@@ -3358,6 +3451,19 @@ void RegisterKernel32(HleKernel& kernel) {
         return pSid ? (pSid + 8 + idx * 4) : 0;
     });
 
+    kernel.RegisterHook("advapi32.dll", "RegOpenKeyW", [](CpuContext&, MemoryManager&) -> u64 {
+        return 2; // ERROR_FILE_NOT_FOUND
+    });
+    kernel.RegisterHook("advapi32.dll", "RegOpenKeyExW", [](CpuContext&, MemoryManager&) -> u64 {
+        return 2; // ERROR_FILE_NOT_FOUND
+    });
+    kernel.RegisterHook("advapi32.dll", "RegQueryValueExW", [](CpuContext&, MemoryManager&) -> u64 {
+        return 2; // ERROR_FILE_NOT_FOUND
+    });
+    kernel.RegisterHook("advapi32.dll", "RegCloseKey", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0; // ERROR_SUCCESS
+    });
+
     // VERSION.dll
     auto verSizeHandler = [](CpuContext& ctx, MemoryManager& mem) -> u64 {
         GuestAddr pHandle = ctx.rdx;
@@ -3776,6 +3882,633 @@ void RegisterKernel32(HleKernel& kernel) {
         return 0x88780078;
     });
     kernel.RegisterHook("dsound.dll", "DirectSoundCaptureEnumerateW", [](CpuContext& ctx, MemoryManager& mem) -> u64 { return 0; });
+
+    // Standard CRT argument & runtime hooks
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "__p___argc", [](CpuContext&, MemoryManager& mem) -> u64 {
+        EnsureGlobalBuffers(mem);
+        return s_argcPtr;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "__p___argv", [](CpuContext&, MemoryManager& mem) -> u64 {
+        EnsureGlobalBuffers(mem);
+        return s_argvPtr;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_get_narrow_winmain_command_line", [](CpuContext&, MemoryManager& mem) -> u64 {
+        EnsureGlobalBuffers(mem);
+        return s_cmdLineA;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_register_thread_local_exe_atexit_callback", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_configure_narrow_argv", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_narrow_environment", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_narrow_environment", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_crt_atexit", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_register_onexit_function", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-heap-l1-1-0.dll", "_set_new_mode", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-locale-l1-1-0.dll", "_configthreadlocale", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "tanf", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float x = 0.0f;
+        std::memcpy(&x, &ctx.ymm[0].qwords[0], 4);
+        float res = std::tan(x);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "sinf", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float x = 0.0f;
+        std::memcpy(&x, &ctx.ymm[0].qwords[0], 4);
+        float res = std::sin(x);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "cosf", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float x = 0.0f;
+        std::memcpy(&x, &ctx.ymm[0].qwords[0], 4);
+        float res = std::cos(x);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "atan2f", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float y = 0.0f, x = 0.0f;
+        std::memcpy(&y, &ctx.ymm[0].qwords[0], 4);
+        std::memcpy(&x, &ctx.ymm[1].qwords[0], 4);
+        float res = std::atan2(y, x);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "powf", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float x = 0.0f, y = 0.0f;
+        std::memcpy(&x, &ctx.ymm[0].qwords[0], 4);
+        std::memcpy(&y, &ctx.ymm[1].qwords[0], 4);
+        float res = std::pow(x, y);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "exp2f", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float x = 0.0f;
+        std::memcpy(&x, &ctx.ymm[0].qwords[0], 4);
+        float res = std::exp2(x);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-math-l1-1-0.dll", "log10f", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        float x = 0.0f;
+        std::memcpy(&x, &ctx.ymm[0].qwords[0], 4);
+        float res = std::log10(x);
+        std::memcpy(&ctx.ymm[0].qwords[0], &res, 4);
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_seh_filter_exe", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_set_app_type", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "_set_invalid_parameter_handler", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        return ctx.rcx;
+    });
+    kernel.RegisterHook("vcruntime140.dll", "_set_purecall_handler", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        return ctx.rcx;
+    });
+    kernel.RegisterHook("api-ms-win-crt-time-l1-1-0.dll", "_time64", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr pTime = ctx.rcx;
+        u64 curTime = static_cast<u64>(std::time(nullptr));
+        if (pTime) {
+            mem.Write<u64>(pTime, curTime);
+        }
+        return curTime;
+    });
+    kernel.RegisterHook("api-ms-win-crt-utility-l1-1-0.dll", "qsort", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        // qsort(base, num, width, compare)
+        // Stub: no-op is often safe for initial sorting or logging
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-utility-l1-1-0.dll", "srand", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-utility-l1-1-0.dll", "rand", [](CpuContext&, MemoryManager&) -> u64 {
+        return static_cast<u64>(std::rand() & 0x7FFF);
+    });
+    kernel.RegisterHook("msvcp140.dll", "?_Random_device@std@@YAIXZ", [](CpuContext&, MemoryManager&) -> u64 {
+        static std::mt19937 rng(1337);
+        return static_cast<u64>(rng());
+    });
+    kernel.RegisterHook("api-ms-win-crt-stdio-l1-1-0.dll", "_set_fmode", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-stdio-l1-1-0.dll", "__p__commode", [](CpuContext&, MemoryManager& mem) -> u64 {
+        static GuestAddr commodeAddr = 0;
+        if (!commodeAddr) {
+            commodeAddr = mem.Allocate(sizeof(u32), MemoryProtection::ReadWrite);
+            mem.Write<u32>(commodeAddr, 0);
+        }
+        return commodeAddr;
+    });
+    kernel.RegisterHook("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsprintf", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        // int __stdio_common_vsprintf(options, str, len, format, locale, valist)
+        u64 strAddr = ctx.rdx;
+        u64 maxLen = ctx.r8;
+        GuestAddr fmtAddr = ctx.r9;
+        const char* fmt = fmtAddr ? reinterpret_cast<const char*>(mem.Translate(fmtAddr)) : nullptr;
+        char* dest = strAddr ? reinterpret_cast<char*>(mem.Translate(strAddr)) : nullptr;
+        if (dest && fmt && maxLen > 0) {
+            // Safe copy of format string if no complex specifiers
+            std::strncpy(dest, fmt, maxLen - 1);
+            dest[maxLen - 1] = '\0';
+            return static_cast<u64>(std::strlen(dest));
+        }
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vswprintf_s", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rdx;
+        u64 maxLen = ctx.r8;
+        GuestAddr fmtAddr = ctx.r9;
+        const char16_t* fmt = fmtAddr ? reinterpret_cast<const char16_t*>(mem.Translate(fmtAddr)) : nullptr;
+        char16_t* dest = strAddr ? reinterpret_cast<char16_t*>(mem.Translate(strAddr)) : nullptr;
+        if (dest && fmt && maxLen > 0) {
+            u64 i = 0;
+            while (i < maxLen - 1 && fmt[i] != 0) {
+                dest[i] = fmt[i];
+                i++;
+            }
+            dest[i] = 0;
+            return i;
+        }
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "terminate", [](CpuContext&, MemoryManager&) -> u64 {
+        s_processExited = true;
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "abort", [](CpuContext&, MemoryManager&) -> u64 {
+        s_processExited = true;
+        return 0;
+    });
+
+    // Standard CRT memory & string hooks
+    kernel.RegisterHook("vcruntime140.dll", "memset", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 dest = ctx.rcx;
+        u8 c = static_cast<u8>(ctx.rdx);
+        u64 count = ctx.r8;
+        void* hostPtr = mem.Translate(dest);
+        if (hostPtr && count > 0) {
+            std::memset(hostPtr, c, count);
+        }
+        return dest;
+    });
+    kernel.RegisterHook("vcruntime140.dll", "memcpy", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 dest = ctx.rcx;
+        u64 src = ctx.rdx;
+        u64 count = ctx.r8;
+        void* hostDst = mem.Translate(dest);
+        void* hostSrc = mem.Translate(src);
+        if (hostDst && hostSrc && count > 0) {
+            std::memcpy(hostDst, hostSrc, count);
+        }
+        return dest;
+    });
+    kernel.RegisterHook("vcruntime140.dll", "memmove", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 dest = ctx.rcx;
+        u64 src = ctx.rdx;
+        u64 count = ctx.r8;
+        void* hostDst = mem.Translate(dest);
+        void* hostSrc = mem.Translate(src);
+        if (hostDst && hostSrc && count > 0) {
+            std::memmove(hostDst, hostSrc, count);
+        }
+        return dest;
+    });
+    kernel.RegisterHook("vcruntime140.dll", "memcmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 p1 = ctx.rcx;
+        u64 p2 = ctx.rdx;
+        u64 count = ctx.r8;
+        void* h1 = mem.Translate(p1);
+        void* h2 = mem.Translate(p2);
+        if (h1 && h2 && count > 0) {
+            return static_cast<u64>(static_cast<s64>(std::memcmp(h1, h2, count)));
+        }
+        return 0;
+    });
+
+    kernel.RegisterHook("ucrtbase.dll", "strlen", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        return static_cast<u64>(std::strlen(s));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strnlen", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        u64 maxCount = ctx.rdx;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s || maxCount == 0) return 0;
+        return static_cast<u64>(strnlen(s, maxCount));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "_strnicmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        u64 count = ctx.r8;
+        const char* s1 = reinterpret_cast<const char*>(mem.Translate(s1Addr));
+        const char* s2 = reinterpret_cast<const char*>(mem.Translate(s2Addr));
+        if (!s1 || !s2 || count == 0) return 0;
+        return static_cast<u64>(static_cast<s64>(strncasecmp(s1, s2, count)));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "_stricmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        const char* s1 = reinterpret_cast<const char*>(mem.Translate(s1Addr));
+        const char* s2 = reinterpret_cast<const char*>(mem.Translate(s2Addr));
+        if (!s1 || !s2) return 0;
+        return static_cast<u64>(static_cast<s64>(strcasecmp(s1, s2)));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strncmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        u64 count = ctx.r8;
+        const char* s1 = reinterpret_cast<const char*>(mem.Translate(s1Addr));
+        const char* s2 = reinterpret_cast<const char*>(mem.Translate(s2Addr));
+        if (!s1 || !s2 || count == 0) return 0;
+        return static_cast<u64>(static_cast<s64>(std::strncmp(s1, s2, count)));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strcmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        const char* s1 = reinterpret_cast<const char*>(mem.Translate(s1Addr));
+        const char* s2 = reinterpret_cast<const char*>(mem.Translate(s2Addr));
+        if (!s1 || !s2) return 0;
+        return static_cast<u64>(static_cast<s64>(std::strcmp(s1, s2)));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "wcslen", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        const char16_t* s = reinterpret_cast<const char16_t*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        u64 len = 0;
+        while (s[len] != 0) len++;
+        return len;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "wcscat_s", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 destAddr = ctx.rcx;
+        u64 destSize = ctx.rdx;
+        u64 srcAddr = ctx.r8;
+        char16_t* dest = destAddr ? reinterpret_cast<char16_t*>(mem.Translate(destAddr)) : nullptr;
+        const char16_t* src = srcAddr ? reinterpret_cast<const char16_t*>(mem.Translate(srcAddr)) : nullptr;
+        if (!dest || !src || destSize == 0) return 22; // EINVAL
+        u64 curLen = 0;
+        while (curLen < destSize && dest[curLen] != 0) curLen++;
+        if (curLen >= destSize) return 22; // EINVAL
+        u64 i = 0;
+        while (src[i] != 0) {
+            if (curLen + i + 1 >= destSize) {
+                dest[0] = 0;
+                return 34; // ERANGE
+            }
+            dest[curLen + i] = src[i];
+            i++;
+        }
+        dest[curLen + i] = 0;
+        return 0; // Success
+    });
+    kernel.RegisterHook("ucrtbase.dll", "wcscmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        const char16_t* s1 = reinterpret_cast<const char16_t*>(mem.Translate(s1Addr));
+        const char16_t* s2 = reinterpret_cast<const char16_t*>(mem.Translate(s2Addr));
+        if (!s1 || !s2) return 0;
+        u64 i = 0;
+        while (s1[i] == s2[i] && s1[i] != 0) i++;
+        return static_cast<u64>(static_cast<s64>(static_cast<s32>(s1[i]) - static_cast<s32>(s2[i])));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "wcsncmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        u64 count = ctx.r8;
+        const char16_t* s1 = reinterpret_cast<const char16_t*>(mem.Translate(s1Addr));
+        const char16_t* s2 = reinterpret_cast<const char16_t*>(mem.Translate(s2Addr));
+        if (!s1 || !s2 || count == 0) return 0;
+        for (u64 i = 0; i < count; i++) {
+            if (s1[i] != s2[i] || s1[i] == 0) {
+                return static_cast<u64>(static_cast<s64>(static_cast<s32>(s1[i]) - static_cast<s32>(s2[i])));
+            }
+        }
+        return 0;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "_wcsicmp", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        const char16_t* s1 = reinterpret_cast<const char16_t*>(mem.Translate(s1Addr));
+        const char16_t* s2 = reinterpret_cast<const char16_t*>(mem.Translate(s2Addr));
+        if (!s1 || !s2) return 0;
+        u64 i = 0;
+        while (true) {
+            char16_t c1 = (s1[i] >= u'A' && s1[i] <= u'Z') ? (s1[i] + (u'a' - u'A')) : s1[i];
+            char16_t c2 = (s2[i] >= u'A' && s2[i] <= u'Z') ? (s2[i] + (u'a' - u'A')) : s2[i];
+            if (c1 != c2 || c1 == 0) {
+                return static_cast<u64>(static_cast<s64>(static_cast<s32>(c1) - static_cast<s32>(c2)));
+            }
+            i++;
+        }
+        return 0;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strcpy", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 destAddr = ctx.rcx;
+        u64 srcAddr = ctx.rdx;
+        char* dest = reinterpret_cast<char*>(mem.Translate(destAddr));
+        const char* src = reinterpret_cast<const char*>(mem.Translate(srcAddr));
+        if (dest && src) {
+            std::strcpy(dest, src);
+        }
+        return destAddr;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strchr", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        int c = static_cast<int>(ctx.rdx);
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        const char* res = std::strchr(s, c);
+        return res ? (strAddr + (res - s)) : 0;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strrchr", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        int c = static_cast<int>(ctx.rdx);
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        const char* res = std::strrchr(s, c);
+        return res ? (strAddr + (res - s)) : 0;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "wcsrchr", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        char16_t c = static_cast<char16_t>(ctx.rdx);
+        const char16_t* s = reinterpret_cast<const char16_t*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        const char16_t* last = nullptr;
+        for (u64 i = 0;; i++) {
+            if (s[i] == c) last = &s[i];
+            if (s[i] == 0) break;
+        }
+        return last ? (strAddr + (last - s) * sizeof(char16_t)) : 0;
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strtok_s", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 strAddr = ctx.rcx;
+        u64 delimAddr = ctx.rdx;
+        u64 contextAddr = ctx.r8;
+        char* str = strAddr ? reinterpret_cast<char*>(mem.Translate(strAddr)) : nullptr;
+        const char* delim = reinterpret_cast<const char*>(mem.Translate(delimAddr));
+        u64* ctxPtr = reinterpret_cast<u64*>(mem.Translate(contextAddr));
+        if (!delim || !ctxPtr) return 0;
+
+        char* saveptr = nullptr;
+        if (!str && *ctxPtr) {
+            saveptr = reinterpret_cast<char*>(mem.Translate(*ctxPtr));
+        } else if (str) {
+            saveptr = str;
+        }
+
+        if (!saveptr) return 0;
+        // Skip leading delimiters
+        while (*saveptr && std::strchr(delim, *saveptr)) {
+            saveptr++;
+        }
+        if (!*saveptr) {
+            *ctxPtr = 0;
+            return 0;
+        }
+        char* token = saveptr;
+        while (*saveptr && !std::strchr(delim, *saveptr)) {
+            saveptr++;
+        }
+        if (*saveptr) {
+            *saveptr = '\0';
+            saveptr++;
+            u64 offset = saveptr - reinterpret_cast<char*>(mem.Translate(0)); // host offset
+            // We need guest address for saveptr
+            // Calculate guest address from token
+            u64 tokenGuest = strAddr ? (strAddr + (token - str)) : (*ctxPtr + (token - reinterpret_cast<char*>(mem.Translate(*ctxPtr))));
+            u64 nextGuest = tokenGuest + (saveptr - token);
+            *ctxPtr = nextGuest;
+            return tokenGuest;
+        } else {
+            *ctxPtr = 0;
+            u64 tokenGuest = strAddr ? (strAddr + (token - str)) : (*ctxPtr + (token - reinterpret_cast<char*>(mem.Translate(*ctxPtr))));
+            return tokenGuest;
+        }
+    });
+
+    // Xbox PSM (Process State Management) hooks
+    kernel.RegisterHook("api-ms-win-core-psm-appnotify-l1-1-0.dll", "RegisterAppStateChangeNotification", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        if (ctx.r8) {
+            mem.Write<u64>(ctx.r8, 0x101);
+        }
+        return 0; // S_OK
+    });
+    kernel.RegisterHook("api-ms-win-core-psm-appnotify-l1-1-0.dll", "UnregisterAppStateChangeNotification", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-core-psm-appnotify-l1-1-1.dll", "RegisterAppConstrainedChangeNotification", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        if (ctx.r8) {
+            mem.Write<u64>(ctx.r8, 0x102);
+        }
+        return 0; // S_OK
+    });
+    kernel.RegisterHook("api-ms-win-core-psm-appnotify-l1-1-1.dll", "UnregisterAppConstrainedChangeNotification", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+
+    // xmem.dll - Xbox GameOS Memory Management
+    kernel.RegisterHook("xmem.dll", "XMemAlloc", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 size = ctx.rcx;
+        u64 attrs = ctx.rdx;
+        if (size == 0) return 0;
+        u64 align = (attrs & 0x00010000) ? 65536 : 4096;
+        size = (size + align - 1) & ~(align - 1);
+        GuestAddr addr = mem.Allocate(size, MemoryProtection::ReadWrite);
+        LOG_DEBUG("Kernel", "XMemAlloc(size=0x" + std::to_string(size) + ") -> 0x" + std::to_string(addr));
+        return addr;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemAllocDefault", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 size = ctx.rcx;
+        u64 attrs = ctx.rdx;
+        if (size == 0) return 0;
+        u64 align = (attrs & 0x00010000) ? 65536 : 4096;
+        size = (size + align - 1) & ~(align - 1);
+        GuestAddr addr = mem.Allocate(size, MemoryProtection::ReadWrite);
+        return addr;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemFree", [](CpuContext&, MemoryManager&) -> u64 {
+        return 1;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemFreeDefault", [](CpuContext&, MemoryManager&) -> u64 {
+        return 1;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemAllocatePhysicalPages", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 size = ctx.rdx;
+        if (size == 0) return 0;
+        size = (size + 0xFFF) & ~0xFFFULL;
+        return mem.Allocate(size, MemoryProtection::ReadWrite);
+    });
+    kernel.RegisterHook("xmem.dll", "XMemFreePhysicalPages", [](CpuContext&, MemoryManager&) -> u64 {
+        return 1;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemGetWorkingSetStatistics", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        if (ctx.rcx) {
+            void* host = mem.Translate(ctx.rcx);
+            if (host) std::memset(host, 0, 64);
+        }
+        return 1;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemIsToolsMemAvailable", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemMapPhysicalPages", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        return ctx.rcx;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemMapPhysicalPagesScatter", [](CpuContext& ctx, MemoryManager&) -> u64 {
+        return ctx.rcx;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemTransferMemory", [](CpuContext&, MemoryManager&) -> u64 {
+        return 1;
+    });
+    kernel.RegisterHook("xmem.dll", "XMemVirtualAlloc", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 addr = ctx.rcx;
+        u64 size = ctx.rdx;
+        u64 caller = mem.Read<u64>(ctx.rsp);
+        if (size == 0) {
+            LOG_INFO("Kernel", "XMemVirtualAlloc: size=0 caller=0x" + std::to_string(caller));
+            return 0;
+        }
+        size = (size + 0xFFF) & ~0xFFFULL;
+        u64 res = (addr == 0) ? mem.Allocate(size, MemoryProtection::ReadWrite) : addr;
+        std::stringstream ss;
+        ss << "XMemVirtualAlloc: addr=0x" << std::hex << addr << " size=0x" << size
+           << " caller=0x" << caller << " result=0x" << res;
+        LOG_INFO("Kernel", ss.str());
+        return res;
+    });
+
+    // GameInput.dll
+    kernel.RegisterHook("gameinput.dll", "Ordinal_1", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        LOG_INFO("Kernel", "GameInputCreate called");
+        if (ctx.rcx) {
+            static GuestAddr s_gameInputObj = 0;
+            if (s_gameInputObj == 0) {
+                GuestAddr base = mem.Allocate(0x2000, MemoryProtection::ReadWrite);
+                GuestAddr vtbl = base;
+                s_gameInputObj = base + 0x1000;
+                mem.Write<u64>(s_gameInputObj, vtbl);
+                for (size_t i = 0; i < 64; ++i) {
+                    GuestAddr fn = s_hleKernel->GetOrCreateHookTrampoline("gameinput.dll", "GameInputMethod_" + std::to_string(i));
+                    mem.Write<u64>(vtbl + i * 8, fn);
+                }
+            }
+            mem.Write<u64>(ctx.rcx, s_gameInputObj);
+        }
+        return 0; // S_OK
+    });
+    for (size_t i = 0; i < 64; ++i) {
+        kernel.RegisterHook("gameinput.dll", "GameInputMethod_" + std::to_string(i), [](CpuContext&, MemoryManager&) -> u64 {
+            return 0; // S_OK
+        });
+    }
+
+    // xgameruntime.dll - Xbox Game OS / GDK Runtime
+    kernel.RegisterHook("xgameruntime.dll", "QueryApiImpl", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr pProvider = ctx.rcx;
+        GuestAddr pRiid = ctx.rdx;
+        GuestAddr ppv = ctx.r8;
+        LOG_INFO("XGameRuntime", "QueryApiImpl(provider=0x" + std::to_string(pProvider) +
+                 ", riid=0x" + std::to_string(pRiid) + ", ppv=0x" + std::to_string(ppv) + ")");
+        if (ppv != 0) {
+            static GuestAddr s_gdkApiObj = 0;
+            if (s_gdkApiObj == 0) {
+                GuestAddr base = mem.Allocate(0x2000, MemoryProtection::ReadWrite);
+                GuestAddr vtbl = base;
+                s_gdkApiObj = base + 0x800;
+                mem.Write<u64>(s_gdkApiObj, vtbl);
+                for (size_t i = 0; i < 128; ++i) {
+                    GuestAddr fn = s_hleKernel->GetOrCreateHookTrampoline("xgameruntime.dll", "GdkMethod_" + std::to_string(i));
+                    mem.Write<u64>(vtbl + i * 8, fn);
+                }
+            }
+            mem.Write<u64>(ppv, s_gdkApiObj);
+        }
+        return 0; // S_OK
+    });
+
+    for (size_t i = 0; i < 128; ++i) {
+        kernel.RegisterHook("xgameruntime.dll", "GdkMethod_" + std::to_string(i), [](CpuContext&, MemoryManager&) -> u64 {
+            return 0; // S_OK
+        });
+    }
+
+    kernel.RegisterHook("xgameruntime.dll", "InitializeApiImpl", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("XGameRuntime", "InitializeApiImpl()");
+        return 0;
+    });
+
+    kernel.RegisterHook("xgameruntime.dll", "InitializeApiImplEx", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("XGameRuntime", "InitializeApiImplEx()");
+        return 0;
+    });
+
+    kernel.RegisterHook("xgameruntime.dll", "InitializeApiImplEx2", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("XGameRuntime", "InitializeApiImplEx2()");
+        return 0;
+    });
+
+    kernel.RegisterHook("xgameruntime.dll", "UninitializeApiImpl", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("XGameRuntime", "UninitializeApiImpl()");
+        return 0;
+    });
+
+    kernel.RegisterHook("xgameruntime.dll", "XErrorReport", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("XGameRuntime", "XErrorReport()");
+        return 0;
+    });
+
+    // DirectStorage / XCRDAPI.dll
+    kernel.RegisterHook("xcrdapi.dll", "DStorageGetFactory", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr pRiid = ctx.rcx;
+        GuestAddr ppv = ctx.rdx;
+        LOG_INFO("DStorage", "DStorageGetFactory(riid=0x" + std::to_string(pRiid) + ", ppv=0x" + std::to_string(ppv) + ")");
+        if (ppv != 0) {
+            static GuestAddr s_dstorageFactoryObj = 0;
+            if (s_dstorageFactoryObj == 0) {
+                GuestAddr base = mem.Allocate(0x2000, MemoryProtection::ReadWrite);
+                GuestAddr vtbl = base;
+                s_dstorageFactoryObj = base + 0x1000;
+                mem.Write<u64>(s_dstorageFactoryObj, vtbl);
+                for (size_t i = 0; i < 64; ++i) {
+                    GuestAddr fn = s_hleKernel->GetOrCreateHookTrampoline("xcrdapi.dll", "DStorageMethod_" + std::to_string(i));
+                    mem.Write<u64>(vtbl + i * 8, fn);
+                }
+            }
+            mem.Write<u64>(ppv, s_dstorageFactoryObj);
+        }
+        return 0; // S_OK
+    });
+
+    for (size_t i = 0; i < 64; ++i) {
+        kernel.RegisterHook("xcrdapi.dll", "DStorageMethod_" + std::to_string(i), [](CpuContext&, MemoryManager&) -> u64 {
+            return 0; // S_OK
+        });
+    }
 }
 
 } // namespace Scarlett::Modules

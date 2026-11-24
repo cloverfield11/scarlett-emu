@@ -151,8 +151,18 @@ int main(int argc, char* argv[]) {
     }
 
     // Setup CPU context and TEB/PEB
+    Scarlett::GuestAddr mainTlsInit = 0;
+    Scarlett::u64 mainTlsSize = 0;
+    for (const auto& mod : loader.GetLoadedModules()) {
+        if (mod.tlsRawStart != 0 && mod.tlsRawEnd > mod.tlsRawStart) {
+            mainTlsInit = mod.tlsRawStart;
+            mainTlsSize = mod.tlsRawEnd - mod.tlsRawStart;
+            break;
+        }
+    }
+
     Scarlett::CpuContext cpu;
-    cpu.gsBase = Scarlett::EnvironmentManager::InitializeTebPeb(memory, loader.GetImageBase());
+    cpu.gsBase = Scarlett::EnvironmentManager::InitializeTebPeb(memory, loader.GetImageBase(), mainTlsInit, mainTlsSize);
     cpu.rsp = Scarlett::GUEST_MEMORY_BASE + 0x800000;
     Scarlett::Modules::InitMainThread(cpu, memory);
 
@@ -362,6 +372,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (batchLimit > 0) {
+        cpu.DumpState();
         LOG_INFO("Core", "Top HLE calls:");
         for (const auto& [name, count] : kernel.GetTopCallStats(15)) {
             LOG_INFO("Core", "  " + name + ": " + std::to_string(count));

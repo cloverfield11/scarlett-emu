@@ -18,6 +18,26 @@ void HleKernel::Initialize() {
     RegisterDefaultModules();
 }
 
+static std::vector<std::string> GetModuleAliases(const std::string& lowerMod) {
+    if (lowerMod.find("api-ms-win-core-") == 0 || 
+        lowerMod.find("ext-ms-win-") == 0 || 
+        lowerMod.find("api-ms-win-downlevel-") == 0) {
+        return {"kernel32.dll", "kernelbase.dll", "advapi32.dll", "user32.dll", "ntdll.dll"};
+    }
+    if (lowerMod.find("api-ms-win-crt-") == 0 || 
+        lowerMod.find("vcruntime") == 0 || 
+        lowerMod.find("msvcp") == 0) {
+        return {"ucrtbase.dll", "vcruntime140.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "api-ms-win-crt-string-l1-1-0.dll", "msvcr120.dll", "msvcrt.dll", "kernel32.dll"};
+    }
+    if (lowerMod == "d3d12_xs.dll" || lowerMod == "d3d12_x.dll" || lowerMod == "d3d12.dll") {
+        return {"d3d12_x.dll", "d3d12.dll"};
+    }
+    if (lowerMod == "xg_xs.dll" || lowerMod == "xg_x.dll") {
+        return {"xg_x.dll", "xg.dll"};
+    }
+    return {};
+}
+
 void HleKernel::RegisterHook(const std::string& moduleName, const std::string& functionName, HleFunction handler) {
     std::string key = moduleName + "!" + functionName;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -40,6 +60,42 @@ bool HleKernel::ExecuteHook(const std::string& moduleName, const std::string& fu
         return true;
     }
 
+    std::string lowerMod = moduleName;
+    std::transform(lowerMod.begin(), lowerMod.end(), lowerMod.begin(), ::tolower);
+    std::string lowerFunc = functionName;
+    std::transform(lowerFunc.begin(), lowerFunc.end(), lowerFunc.begin(), ::tolower);
+
+    // Try module aliases
+    std::vector<std::string> aliases = GetModuleAliases(lowerMod);
+    for (const auto& aliasMod : aliases) {
+        std::string aliasKey = aliasMod + "!" + lowerFunc;
+        auto aliasIt = m_hooks.find(aliasKey);
+        if (aliasIt != m_hooks.end()) {
+            m_hooks[key] = aliasIt->second; // Cache resolved alias
+            m_callCounts[aliasKey]++;
+            u64 result = aliasIt->second(ctx, m_memory);
+            if (!(m_yieldRequested && m_retryOnWake)) {
+                ctx.rax = result;
+            }
+            return true;
+        }
+    }
+
+    // Fallback: check any registered module with this function name
+    std::string funcSuffix = "!" + lowerFunc;
+    for (const auto& [regKey, handler] : m_hooks) {
+        if (regKey.size() >= funcSuffix.size() &&
+            regKey.compare(regKey.size() - funcSuffix.size(), funcSuffix.size(), funcSuffix) == 0) {
+            m_hooks[key] = handler; // Cache alias
+            m_callCounts[regKey]++;
+            u64 result = handler(ctx, m_memory);
+            if (!(m_yieldRequested && m_retryOnWake)) {
+                ctx.rax = result;
+            }
+            return true;
+        }
+    }
+
     LOG_WARN("Kernel", "Unimplemented HLE function called: " + moduleName + "!" + functionName);
     ctx.rax = 0;
     return false;
@@ -49,14 +105,11 @@ bool HleKernel::ExecuteHookByTrampoline(GuestAddr trampolineAddr, CpuContext& ct
     auto it = m_trampolineMap.find(trampolineAddr);
     if (it != m_trampolineMap.end()) {
         const std::string& key = it->second;
-        auto hookIt = m_hooks.find(key);
-        if (hookIt != m_hooks.end()) {
-            m_callCounts[key]++;
-            u64 result = hookIt->second(ctx, m_memory);
-            if (!(m_yieldRequested && m_retryOnWake)) {
-                ctx.rax = result;
-            }
-            return true;
+        size_t sep = key.find('!');
+        if (sep != std::string::npos) {
+            std::string mod = key.substr(0, sep);
+            std::string func = key.substr(sep + 1);
+            return ExecuteHook(mod, func, ctx);
         }
     }
     return false;
@@ -74,7 +127,26 @@ std::vector<std::pair<std::string, u64>> HleKernel::GetTopCallStats(size_t limit
 bool HleKernel::HasHook(const std::string& moduleName, const std::string& functionName) const {
     std::string key = moduleName + "!" + functionName;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-    return m_hooks.find(key) != m_hooks.end();
+    if (m_hooks.find(key) != m_hooks.end()) return true;
+
+    std::string lowerMod = moduleName;
+    std::transform(lowerMod.begin(), lowerMod.end(), lowerMod.begin(), ::tolower);
+    std::string lowerFunc = functionName;
+    std::transform(lowerFunc.begin(), lowerFunc.end(), lowerFunc.begin(), ::tolower);
+
+    std::vector<std::string> aliases = GetModuleAliases(lowerMod);
+    for (const auto& aliasMod : aliases) {
+        if (m_hooks.find(aliasMod + "!" + lowerFunc) != m_hooks.end()) return true;
+    }
+
+    std::string funcSuffix = "!" + lowerFunc;
+    for (const auto& [regKey, _] : m_hooks) {
+        if (regKey.size() >= funcSuffix.size() &&
+            regKey.compare(regKey.size() - funcSuffix.size(), funcSuffix.size(), funcSuffix) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 GuestAddr HleKernel::GetOrCreateHookTrampoline(const std::string& moduleName, const std::string& functionName) {

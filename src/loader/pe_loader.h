@@ -118,6 +118,11 @@ struct LoadedModule {
     std::vector<SectionHeader> sections;
     std::vector<ExportedFunction> exports;
     std::unordered_map<std::string, GuestAddr> exportMap; // lowercase name -> address
+    GuestAddr tlsRawStart{0};
+    GuestAddr tlsRawEnd{0};
+    GuestAddr tlsIndexAddr{0};
+    GuestAddr tlsCallbacksAddr{0};
+    u32 tlsZeroFill{0};
 };
 
 class PeLoader {
@@ -139,6 +144,7 @@ private:
     bool MapSections(const std::vector<u8>& rawData, LoadedModule& module);
     bool ParseExports(const std::vector<u8>& rawData, LoadedModule& module);
     bool ParseImports(const std::vector<u8>& rawData, LoadedModule& module);
+    bool ParseTls(const std::vector<u8>& rawData, LoadedModule& module);
     bool ApplyRelocations(LoadedModule& module, s64 delta);
 
     MemoryManager& m_memory;
@@ -153,6 +159,8 @@ private:
 
     GuestAddr m_trampolinePool{0};
     u32 m_trampolineOffset{0};
+    GuestAddr m_inittermAddr{0};
+    GuestAddr m_inittermEAddr{0};
 };
 
 } // namespace Scarlett

@@ -29,8 +29,11 @@ struct alignas(16) CpuContext {
     u64 gsBase{0}; // GS Segment Base (Points to TEB in Windows x64)
 
     // AVX2 / YMM registers (256-bit SIMD registers)
-    struct YmmReg {
+    union YmmReg {
         u64 qwords[4];
+        u32 dwords[8];
+        float floats[8];
+        double doubles[4];
     } ymm[16];
 
     void DumpState() const;

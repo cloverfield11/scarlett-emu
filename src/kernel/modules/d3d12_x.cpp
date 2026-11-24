@@ -115,6 +115,7 @@ GuestAddr g_dxgiSwapChainObj = 0;
 GuestAddr g_d3d11DeviceObj = 0;
 GuestAddr g_d3d11ContextObj = 0;
 GuestAddr g_d3d12DeviceObj = 0;
+GuestAddr g_d3d12ResourceObj = 0;
 GuestAddr g_backbufferTex = 0;
 
 struct D3D11ContextState {
@@ -986,7 +987,7 @@ void RegisterD3D12X(HleKernel& kernel) {
 
         if (ppDevice) {
             if (!g_d3d12DeviceObj) {
-                g_d3d12DeviceObj = CreateComObject(kernel, mem, "ID3D12Device", 64, {
+                g_d3d12DeviceObj = CreateComObject(kernel, mem, "ID3D12Device", 256, {
                     {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
                     {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
                     {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
@@ -1084,6 +1085,87 @@ void RegisterD3D12X(HleKernel& kernel) {
         LOG_INFO("D3D11", "D3D11CreateDeviceAndSwapChain succeeded!");
         return 0; // S_OK
     });
+
+    kernel.RegisterHook("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("D3D12X", "D3D12ConfigureVirtualMemoryX called -> S_OK");
+        return 0; // S_OK
+    });
+    kernel.RegisterHook("d3d12_x.dll", "D3D12ConfigureVirtualMemoryX", [](CpuContext&, MemoryManager&) -> u64 {
+        LOG_INFO("D3D12X", "D3D12ConfigureVirtualMemoryX called -> S_OK");
+        return 0; // S_OK
+    });
+
+    auto xboxCreateDeviceHandler = [&kernel](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr ppDevice = ctx.r9;
+        LOG_INFO("D3D12X", "D3D12XboxCreateDevice called! ppDevice=0x" + std::to_string(ppDevice));
+
+        MetalRenderer* renderer = GetMetalRenderer();
+        if (renderer) {
+            renderer->CreateWindowAndPipeline();
+            renderer->RenderFrame();
+            renderer->PollEvents();
+        }
+
+        if (ppDevice) {
+            if (!g_d3d12DeviceObj) {
+                if (!g_d3d12ResourceObj) {
+                    static GuestAddr s_resourceBuffer = 0;
+                    if (!s_resourceBuffer) {
+                        s_resourceBuffer = mem.Allocate(0x2000000, MemoryProtection::ReadWrite); // 32MB buffer
+                    }
+                    g_d3d12ResourceObj = CreateComObject(kernel, mem, "ID3D12Resource", 256, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                        // 7 (0x38): Return resource object itself or buffer
+                        {7, [](CpuContext& c, MemoryManager& m) -> u64 {
+                            if (c.r8) {
+                                m.Write<GuestAddr>(c.r8, g_d3d12ResourceObj);
+                            }
+                            if (c.rdx && !c.r8) {
+                                m.Write<GuestAddr>(c.rdx, g_d3d12ResourceObj);
+                            }
+                            return 0; // S_OK
+                        }},
+                        // 8 (0x40): ID3D12Resource::Unmap
+                        {8, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 9 (0x48): ID3D12Resource::GetGPUVirtualAddress
+                        {9, [](CpuContext&, MemoryManager&) -> u64 { return s_resourceBuffer; }},
+                    });
+                }
+                g_d3d12DeviceObj = CreateComObject(kernel, mem, "ID3D12Device", 256, {
+                    {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                    {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                    {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                    // 7 (0x38): if called on device
+                    {7, [](CpuContext& c, MemoryManager& m) -> u64 {
+                        if (c.rdx) m.Write<GuestAddr>(c.rdx, g_d3d12ResourceObj);
+                        return 0;
+                    }},
+                    // 73 (0x248): CreateCommittedResource(pHeapProps, HeapFlags, pDesc, InitialState, pClearValue, riid, ppvResource)
+                    {73, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr pRiid = m.Read<GuestAddr>(c.rsp + 0x28);
+                        GuestAddr ppvResource = m.Read<GuestAddr>(c.rsp + 0x30);
+                        LOG_INFO("D3D12X", "ID3D12Device::CreateCommittedResource: riid=0x" + std::to_string(pRiid) +
+                                 ", ppvResource=0x" + std::to_string(ppvResource));
+                        if (ppvResource) {
+                            m.Write<GuestAddr>(ppvResource, g_d3d12ResourceObj);
+                        }
+                        if (pRiid && !ppvResource) {
+                            m.Write<GuestAddr>(pRiid, g_d3d12ResourceObj);
+                        }
+                        return 0; // S_OK
+                    }},
+                });
+            }
+            mem.Write<GuestAddr>(ppDevice, g_d3d12DeviceObj);
+            LOG_INFO("D3D12X", "Bridged Xbox D3D12 Device at 0x" + std::to_string(g_d3d12DeviceObj));
+        }
+
+        return 0; // S_OK
+    };
+    kernel.RegisterHook("d3d12_xs.dll", "D3D12XboxCreateDevice", xboxCreateDeviceHandler);
+    kernel.RegisterHook("d3d12_x.dll", "D3D12XboxCreateDevice", xboxCreateDeviceHandler);
 }
 
 } // namespace Scarlett::Modules
