@@ -6,6 +6,10 @@
 [![Standard](https://img.shields.io/badge/Standard-ISO%20C%2B%2B20%20%2F%20Objective--C%2B%2B-blue.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)]()
 
+> [!IMPORTANT]
+> **Grand Theft Auto VI (Xbox Series S Master Binary) Research & Launch Guide:**  
+> Detailed instructions, runtime parameters, and execution milestones for ingesting and running `game_scarlett_master.exe` (91.5M+ instructions, DirectStorage, and Xbox D3D12 HLE) are documented in [docs/GTA6_LAUNCH_GUIDE.md](docs/GTA6_LAUNCH_GUIDE.md).
+
 ---
 
 ## Abstract
@@ -740,6 +744,9 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 
 # 4. Launch commercial Unity title (The Mortuary Assistant) through complete MSVC CRT bootstrap
 ./build/scarlett_emu "The Mortuary Assistant/The Mortuary Assistant.exe"
+
+# 5. Launch Grand Theft Auto VI (Xbox Series S master binary) in batch mode
+./build/scarlett_emu game_scarlett_master.exe --batch 100000000
 ```
 
 ---
