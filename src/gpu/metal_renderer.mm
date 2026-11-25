@@ -203,6 +203,35 @@ bool MetalRenderer::CreateWindowAndPipeline() {
         [m_impl->window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
 
+        // Load game splash screen (scarlet-americas/xbs_splash.png) if present
+        NSString* splashPath = @"scarlet-americas/xbs_splash.png";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:splashPath]) {
+            splashPath = @"xbs_splash.png";
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:splashPath]) {
+            NSImage* img = [[NSImage alloc] initWithContentsOfFile:splashPath];
+            if (img) {
+                CGImageRef cgImg = [img CGImageForProposedRect:nil context:nil hints:nil];
+                if (cgImg) {
+                    size_t w = CGImageGetWidth(cgImg);
+                    size_t h = CGImageGetHeight(cgImg);
+                    std::vector<u8> rawRgba(w * h * 4);
+                    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+                    CGContextRef ctx = CGBitmapContextCreate(rawRgba.data(), w, h, 8, w * 4, colorSpace,
+                                                             (uint32_t)kCGImageAlphaPremultipliedLast | (uint32_t)kCGBitmapByteOrder32Big);
+                    CGColorSpaceRelease(colorSpace);
+                    if (ctx) {
+                        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImg);
+                        CGContextRelease(ctx);
+                        SubmitFramebufferRGBA8(rawRgba.data(), static_cast<u32>(w), static_cast<u32>(h), static_cast<u32>(w * 4));
+                        m_impl->gameFrameActive = true;
+                        LOG_INFO("GPU", "Loaded game title splash screen: " + std::string([splashPath UTF8String]) +
+                                 " (" + std::to_string(w) + "x" + std::to_string(h) + ")");
+                    }
+                }
+            }
+        }
+
         LOG_INFO("GPU", "Cocoa Window & Metal Render Pipeline successfully activated on screen!");
         return true;
     }

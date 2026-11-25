@@ -165,6 +165,8 @@ struct D3D11ContextState {
     float vpX = 0.0f, vpY = 0.0f, vpW = 1280.0f, vpH = 720.0f, vpMinZ = 0.0f, vpMaxZ = 1.0f;
 } g_d3dState;
 
+static GuestAddr s_resourceBuffer = 0;
+
 static void PresentFrameToMetal(MemoryManager& m) {
     MetalRenderer* renderer = GetMetalRenderer();
     if (!renderer) return;
@@ -1135,7 +1137,6 @@ void RegisterD3D12X(HleKernel& kernel) {
         if (ppDevice) {
             if (!g_d3d12DeviceObj) {
                 if (!g_d3d12ResourceObj) {
-                    static GuestAddr s_resourceBuffer = 0;
                     if (!s_resourceBuffer) {
                         s_resourceBuffer = mem.Allocate(0x2000000, MemoryProtection::ReadWrite); // 32MB buffer
                     }
@@ -1217,7 +1218,7 @@ void RegisterD3D12X(HleKernel& kernel) {
                                          " -> Presenting frame to Metal surface!");
                             }
                             PresentFrameToMetal(m);
-                            return 0; // S_OK
+                            return 1; // TRUE (Success)
                         }},
                     });
                 }
