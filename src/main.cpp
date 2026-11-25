@@ -211,6 +211,7 @@ int main(int argc, char* argv[]) {
     LOG_INFO("Core", "Entering interactive real-time game execution loop with Metal presentation (Close window or press ESC to exit)...");
 
     Scarlett::u64 batchLimit = 0;
+    bool enableWindowInBatch = false;
     const char* envLimit = getenv("SCARLETT_BATCH_LIMIT");
     if (envLimit) {
         batchLimit = std::strtoull(envLimit, nullptr, 10);
@@ -218,10 +219,13 @@ int main(int argc, char* argv[]) {
     for (int i = 2; i < argc; ++i) {
         if (std::string(argv[i]) == "--batch" && i + 1 < argc) {
             batchLimit = std::strtoull(argv[i + 1], nullptr, 10);
+        } else if (std::string(argv[i]) == "--window") {
+            enableWindowInBatch = true;
         }
     }
 
-    if (batchLimit == 0) {
+    if (batchLimit == 0 || enableWindowInBatch) {
+        gpu.SetHeadless(false);
         gpu.CreateWindowAndPipeline();
     } else {
         gpu.SetHeadless(true);
@@ -336,7 +340,7 @@ int main(int argc, char* argv[]) {
         if (instrSinceRender >= 1000000 || idleSwitches >= 4096) {
             instrSinceRender = 0;
             idleSwitches = 0;
-            if (batchLimit == 0) {
+            if (batchLimit == 0 || enableWindowInBatch) {
                 gpu.RenderFrame();
                 gpu.PollEvents();
             }
@@ -360,7 +364,7 @@ int main(int argc, char* argv[]) {
                 frame = 0;
                 lastStatsTime = now;
             }
-            if (batchLimit == 0) {
+            if (batchLimit == 0 || enableWindowInBatch) {
                 usleep(1000); // 1ms yield to macOS Cocoa/Metal compositor
             }
         }

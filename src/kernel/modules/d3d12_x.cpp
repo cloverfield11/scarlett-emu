@@ -42,9 +42,11 @@ GuestAddr GetOrCreateSharedVTable(
         vtableAddr = mem.Allocate(numSlots * 8, MemoryProtection::ReadWrite);
         for (size_t i = 0; i < numSlots; ++i) {
             std::string methodName = ifaceName + "::Slot_" + std::to_string(i);
-            kernel.RegisterHook("com_vtable", methodName, [ifaceName, i](CpuContext&, MemoryManager&) -> u64 {
+            std::stringstream ss;
+            ss << std::hex << (i * 8);
+            kernel.RegisterHook("com_vtable", methodName, [ifaceName, i, offsetHex = ss.str()](CpuContext&, MemoryManager&) -> u64 {
                 LOG_WARN("COM", ifaceName + "::Slot_" + std::to_string(i) + " (offset 0x" +
-                         std::to_string(i * 8) + ") unimplemented! Returning S_OK (0)");
+                         offsetHex + ") unimplemented! Returning S_OK (0)");
                 return 0;
             });
             GuestAddr tramp = kernel.GetOrCreateHookTrampoline("com_vtable", methodName);
@@ -1167,6 +1169,18 @@ void RegisterD3D12X(HleKernel& kernel) {
                             }
                             return 0; // S_OK
                         }},
+                        // 23 (0xb8): PresentX preparation / Flush
+                        {23, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 24 (0xc0): PresentX(SyncInterval, Flags, ...)
+                        {24, [](CpuContext&, MemoryManager& m) -> u64 {
+                            ++g_d3dState.presentCount;
+                            if (g_d3dState.presentCount <= 10 || (g_d3dState.presentCount % 60 == 0)) {
+                                LOG_INFO("D3D12X", "ID3D12CommandQueue::PresentX #" + std::to_string(g_d3dState.presentCount) +
+                                         " -> Presenting frame to Metal surface!");
+                            }
+                            PresentFrameToMetal(m);
+                            return 0; // S_OK
+                        }},
                     });
                 }
                 static GuestAddr s_cmdAlloc = 0;
@@ -1275,6 +1289,18 @@ void RegisterD3D12X(HleKernel& kernel) {
                         }
                         return 0; // S_OK
                     }},
+                    // 17 (0x88): CreateConstantBufferView
+                    {17, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                    // 18 (0x90): CreateShaderResourceView
+                    {18, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                    // 19 (0x98): CreateUnorderedAccessView
+                    {19, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                    // 20 (0xa0): CreateRenderTargetView(pResource, pDesc, DestDescriptor)
+                    {20, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                    // 21 (0xa8): CreateDepthStencilView(pResource, pDesc, DestDescriptor)
+                    {21, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                    // 22 (0xb0): CreateSampler
+                    {22, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
                     // 24 (0xc0): CreateCommandQueue (legacy slot alias)
                     {24, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
                         GuestAddr ppCommandQueue = c.r9;
@@ -1341,6 +1367,14 @@ void RegisterD3D12X(HleKernel& kernel) {
                         if (pRiid && !ppvResource) {
                             m.Write<GuestAddr>(pRiid, g_d3d12ResourceObj);
                         }
+                        return 0; // S_OK
+                    }},
+                    // 79 (0x278): WaitFrameEventX / FramePacing
+                    {79, [](CpuContext&, MemoryManager&) -> u64 {
+                        return 0; // S_OK
+                    }},
+                    // 108 (0x360): SetFramePacingX / Enable
+                    {108, [](CpuContext&, MemoryManager&) -> u64 {
                         return 0; // S_OK
                     }},
                 });
