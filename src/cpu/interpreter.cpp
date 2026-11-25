@@ -2840,6 +2840,11 @@ bool Interpreter::Step() {
         m_ctx.rip = 0x140ba381aULL;
         return true;
     }
+    if ((currentRip == 0x142237320ULL || currentRip == 0x142237326ULL) && (m_ctx.rbx == 0 || m_ctx.rax == 0)) {
+        LOG_INFO("VFS", "Archive entry mount returned NULL at 0x142237326, safely skipping entry and jumping to cleanup at 0x14223745a");
+        m_ctx.rip = 0x14223745aULL;
+        return true;
+    }
     if ((currentRip == 0x1424841a3ULL || currentRip == 0x1424841a6ULL) && m_ctx.rcx == 0) {
         // ID3D12CommandQueue::GetTimestampFrequency fallback when uninitialized
         m_memory.Write<u64>(m_ctx.rdi, 100000000ULL); // 100 MHz

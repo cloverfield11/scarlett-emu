@@ -1293,6 +1293,7 @@ void RegisterKernel32(HleKernel& kernel) {
             mem.Write<u32>(lpNumberOfBytesRead, static_cast<u32>(bytesRead));
         }
 
+        LOG_INFO("VFS", "ReadFile(handle=0x" + std::to_string(handle) + ", req=" + std::to_string(nNumberOfBytesToRead) + ") -> bytesRead=" + std::to_string(bytesRead));
         return 1; // TRUE
     });
 
@@ -1409,9 +1410,12 @@ void RegisterKernel32(HleKernel& kernel) {
         return 1;
     });
     // VFS File Operations
-    auto createFileHandler = [](const std::string& rawPath, u32 desiredAccess, u32 creationDisposition, MemoryManager& mem) -> u64 {
+    auto createFileHandler = [](const std::string& rawPath, u32 desiredAccess, u32 creationDisposition, CpuContext& ctx, MemoryManager& mem) -> u64 {
         std::string resolved = ResolveGuestPath(rawPath);
-        LOG_INFO("VFS", "CreateFile: '" + rawPath + "' -> resolved: '" + resolved + "'");
+        u64 callerRip = ctx.rsp ? mem.Read<u64>(ctx.rsp) : 0;
+        char hexBuf[64];
+        snprintf(hexBuf, sizeof(hexBuf), "0x%llx", (unsigned long long)callerRip);
+        LOG_INFO("VFS", "CreateFile: '" + rawPath + "' -> resolved: '" + resolved + "' (Caller: " + hexBuf + ")");
 
         int flags = 0;
         if ((desiredAccess & 0x40000000) && (desiredAccess & 0x80000000)) {
@@ -1456,7 +1460,7 @@ void RegisterKernel32(HleKernel& kernel) {
             }
         }
         std::string path(wpath.begin(), wpath.end());
-        return createFileHandler(path, desiredAccess, creationDisposition, mem);
+        return createFileHandler(path, desiredAccess, creationDisposition, ctx, mem);
     });
 
     kernel.RegisterHook("kernel32.dll", "CreateFileA", [createFileHandler](CpuContext& ctx, MemoryManager& mem) -> u64 {
@@ -1473,7 +1477,7 @@ void RegisterKernel32(HleKernel& kernel) {
                 off++;
             }
         }
-        return createFileHandler(path, desiredAccess, creationDisposition, mem);
+        return createFileHandler(path, desiredAccess, creationDisposition, ctx, mem);
     });
 
     kernel.RegisterHook("kernel32.dll", "SetFilePointerEx", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
@@ -1580,6 +1584,69 @@ void RegisterKernel32(HleKernel& kernel) {
             mem.Write<u32>(lpFileSizeHigh, static_cast<u32>(st.st_size >> 32));
         }
         return static_cast<u32>(st.st_size & 0xFFFFFFFF);
+    });
+
+    kernel.RegisterHook("kernel32.dll", "GetFileTime", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 handle = ctx.rcx;
+        GuestAddr lpCreationTime = ctx.rdx;
+        GuestAddr lpLastAccessTime = ctx.r8;
+        GuestAddr lpLastWriteTime = ctx.r9;
+
+        auto it = s_vfsFiles.find(handle);
+        if (it == s_vfsFiles.end() || it->second.fd < 0) {
+            s_lastErrorCode = 6; // ERROR_INVALID_HANDLE
+            return 0;
+        }
+
+        struct stat st;
+        if (fstat(it->second.fd, &st) != 0) {
+            s_lastErrorCode = 1;
+            return 0;
+        }
+
+        auto unixToFileTime = [](time_t t) -> u64 {
+            return (static_cast<u64>(t) * 10000000ULL) + 116444736000000000ULL;
+        };
+
+        if (lpCreationTime) mem.Write<u64>(lpCreationTime, unixToFileTime(st.st_ctime));
+        if (lpLastAccessTime) mem.Write<u64>(lpLastAccessTime, unixToFileTime(st.st_atime));
+        if (lpLastWriteTime) mem.Write<u64>(lpLastWriteTime, unixToFileTime(st.st_mtime));
+        return 1;
+    });
+
+    kernel.RegisterHook("kernel32.dll", "GetFileInformationByHandle", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 handle = ctx.rcx;
+        GuestAddr lpFileInformation = ctx.rdx;
+        if (!lpFileInformation) return 0;
+
+        auto it = s_vfsFiles.find(handle);
+        if (it == s_vfsFiles.end() || it->second.fd < 0) {
+            s_lastErrorCode = 6;
+            return 0;
+        }
+
+        struct stat st;
+        if (fstat(it->second.fd, &st) != 0) {
+            s_lastErrorCode = 1;
+            return 0;
+        }
+
+        auto unixToFileTime = [](time_t t) -> u64 {
+            return (static_cast<u64>(t) * 10000000ULL) + 116444736000000000ULL;
+        };
+
+        mem.Write<u32>(lpFileInformation + 0, 0x80); // FILE_ATTRIBUTE_NORMAL
+        mem.Write<u64>(lpFileInformation + 4, unixToFileTime(st.st_ctime)); // ftCreationTime
+        mem.Write<u64>(lpFileInformation + 12, unixToFileTime(st.st_atime)); // ftLastAccessTime
+        mem.Write<u64>(lpFileInformation + 20, unixToFileTime(st.st_mtime)); // ftLastWriteTime
+        mem.Write<u32>(lpFileInformation + 28, 0x12345678); // dwVolumeSerialNumber
+        mem.Write<u32>(lpFileInformation + 32, static_cast<u32>(st.st_size >> 32)); // nFileSizeHigh
+        mem.Write<u32>(lpFileInformation + 36, static_cast<u32>(st.st_size & 0xFFFFFFFF)); // nFileSizeLow
+        mem.Write<u32>(lpFileInformation + 40, 1); // nNumberOfLinks
+        mem.Write<u32>(lpFileInformation + 44, static_cast<u32>(st.st_ino >> 32)); // nFileIndexHigh
+        mem.Write<u32>(lpFileInformation + 48, static_cast<u32>(st.st_ino & 0xFFFFFFFF)); // nFileIndexLow
+
+        return 1;
     });
 
     kernel.RegisterHook("kernel32.dll", "FlushFileBuffers", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
@@ -4378,6 +4445,14 @@ void RegisterKernel32(HleKernel& kernel) {
         const char* s2 = reinterpret_cast<const char*>(mem.Translate(s2Addr));
         if (!s1 || !s2) return 0;
         return static_cast<u64>(static_cast<s64>(std::strcmp(s1, s2)));
+    });
+    kernel.RegisterHook("ucrtbase.dll", "strcspn", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        u64 s1Addr = ctx.rcx;
+        u64 s2Addr = ctx.rdx;
+        const char* s1 = reinterpret_cast<const char*>(mem.Translate(s1Addr));
+        const char* s2 = reinterpret_cast<const char*>(mem.Translate(s2Addr));
+        if (!s1 || !s2) return 0;
+        return static_cast<u64>(std::strcspn(s1, s2));
     });
     kernel.RegisterHook("ucrtbase.dll", "wcslen", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
         u64 strAddr = ctx.rcx;
