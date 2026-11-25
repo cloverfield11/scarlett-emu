@@ -27,14 +27,20 @@ cmake -B build -S .
 cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 
-### 2.2 Place the Binary
-Place the master executable directly into the root directory of the emulator repository:
+### 2.2 Place the Binary & Assets
+Place the master executable and assets into `scarlet-americas/`:
 ```
 scarlett-emu/
 ├── build/
 ├── docs/
 │   └── GTA6_LAUNCH_GUIDE.md
-├── game_scarlett_master.exe    <-- [120 MB Xbox Series S binary]
+├── scarlet-americas/
+│   ├── game_scarlett_master.exe    <-- [120 MB Xbox Series S binary]
+│   ├── common/
+│   │   └── data/
+│   └── platform/
+│       ├── data/
+│       └── shaders/
 ├── src/
 └── README.md
 ```
@@ -42,8 +48,8 @@ scarlett-emu/
 ### 2.3 Run Execution (Batch Mode)
 Execute the binary through the AMD Zen 2 CPU interpreter:
 ```bash
-# Run up to 100,000,000 instructions in batch mode
-./build/scarlett_emu game_scarlett_master.exe --batch 100000000
+# Run up to 5,000,000,000 instructions in batch mode
+./build/scarlett_emu scarlet-americas/game_scarlett_master.exe --batch 5000000000
 ```
 
 ---
