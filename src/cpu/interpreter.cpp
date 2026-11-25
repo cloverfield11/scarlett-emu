@@ -1758,12 +1758,19 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
             }
         }
 
-        // 0x0F 0x01: XGETBV (0x0F 0x01 0xD0)
-        if (op2 == 0x01 && code[offset] == 0xD0) {
-            offset++;
-            inst.type = OpcodeType::Xgetbv;
-            inst.length = offset;
-            return inst;
+        // 0x0F 0x01: XGETBV (0x0F 0x01 0xD0) / CLZERO (0x0F 0x01 0xFC)
+        if (op2 == 0x01) {
+            if (code[offset] == 0xD0) {
+                offset++;
+                inst.type = OpcodeType::Xgetbv;
+                inst.length = offset;
+                return inst;
+            } else if (code[offset] == 0xFC) {
+                offset++;
+                inst.type = OpcodeType::Clzero;
+                inst.length = offset;
+                return inst;
+            }
         }
 
         // 0x0F 0x0B: HLE Trap (UD2)
@@ -2344,6 +2351,14 @@ DecodedInstruction X86Decoder::Decode(const u8* code, u64 rip) {
                 inst.type = (subop == 3) ? OpcodeType::Stmxcsr : OpcodeType::Nop;
                 inst.length = offset;
                 return inst;
+            } else if (subop == 6 || subop == 7) {
+                // subop 6: CLWB (with 0x66 prefix)
+                // subop 7: CLFLUSH (without prefix) or CLFLUSHOPT (with 0x66 prefix)
+                Operand unused;
+                DecodeModRM(code, offset, rex, isGs, 1, unused, inst.op1);
+                inst.type = OpcodeType::Nop;
+                inst.length = offset;
+                return inst;
             }
         }
 
@@ -2806,6 +2821,43 @@ bool Interpreter::Step() {
     if (m_halted) return false;
 
     u64 currentRip = m_ctx.rip;
+    if (currentRip == 0x1419f4880ULL && m_ctx.rcx == 0) {
+        // Scalar deleting destructor on NULL pointer (delete nullptr): safe no-op
+        u64 retAddr = m_memory.Read<u64>(m_ctx.rsp);
+        m_ctx.rsp += 8;
+        m_ctx.rip = retAddr;
+        return true;
+    }
+    if (currentRip == 0x144ecc830ULL && m_ctx.rcx == 0) {
+        // Cache line flush on NULL pointer: safe no-op
+        u64 retAddr = m_memory.Read<u64>(m_ctx.rsp);
+        m_ctx.rsp += 8;
+        m_ctx.rip = retAddr;
+        return true;
+    }
+    if (currentRip == 0x140ba37aeULL && m_ctx.rcx == 0) {
+        // Resource in descriptor at 0x60(%rsi) is null: safe early return
+        m_ctx.rip = 0x140ba381aULL;
+        return true;
+    }
+    if ((currentRip == 0x1424841a3ULL || currentRip == 0x1424841a6ULL) && m_ctx.rcx == 0) {
+        // ID3D12CommandQueue::GetTimestampFrequency fallback when uninitialized
+        m_memory.Write<u64>(m_ctx.rdi, 100000000ULL); // 100 MHz
+        m_ctx.rax = 0; // S_OK
+        m_ctx.rip = 0x1424841acULL;
+        return true;
+    }
+    if (currentRip == 0x142484083ULL || currentRip == 0x142484254ULL) {
+        GuestAddr tlsSlotPtr = m_ctx.rax + 0x12a8;
+        if (m_memory.Read<u64>(tlsSlotPtr) == 0) {
+            static GuestAddr s_grcContext = 0;
+            if (!s_grcContext) {
+                s_grcContext = m_memory.Allocate(0x60000, MemoryProtection::ReadWrite);
+            }
+            m_memory.Write<u64>(tlsSlotPtr, s_grcContext);
+            LOG_INFO("Kernel", "Lazy-initialized RAGE grcDeviceContext TLS block at 0x" + std::to_string(s_grcContext));
+        }
+    }
     if (currentRip < 0x140000000ULL) {
         std::stringstream ss;
         ss << "Non-executable/low-address execution fault at RIP=0x" << std::hex << currentRip
@@ -3270,6 +3322,17 @@ bool Interpreter::Step() {
             // XCR0 state: x87 (bit 0) | SSE (bit 1) | AVX (bit 2) = 0x7
             m_ctx.rax = 7;
             m_ctx.rdx = 0;
+            break;
+        }
+
+        case OpcodeType::Clzero: {
+            // CLZERO: zero out 64-byte cache line starting at RAX (aligned to 64 bytes)
+            GuestAddr addr = m_ctx.rax & ~0x3FULL;
+            if (addr >= 0x10000) {
+                for (u64 o = 0; o < 64; o += 8) {
+                    m_memory.Write<u64>(addr + o, 0);
+                }
+            }
             break;
         }
 

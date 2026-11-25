@@ -34,26 +34,34 @@ GuestAddr GetOrCreateSharedVTable(
     const std::unordered_map<size_t, HleFunction>& overrides)
 {
     static std::unordered_map<std::string, GuestAddr> s_vtables;
+    GuestAddr vtableAddr = 0;
     auto found = s_vtables.find(ifaceName);
-    if (found != s_vtables.end()) return found->second;
-
-    GuestAddr vtableAddr = mem.Allocate(numSlots * 8, MemoryProtection::ReadWrite);
-    for (size_t i = 0; i < numSlots; ++i) {
-        std::string methodName = ifaceName + "::Slot_" + std::to_string(i);
-        auto it = overrides.find(i);
-        if (it != overrides.end()) {
-            kernel.RegisterHook("com_vtable", methodName, it->second);
-        } else {
-            kernel.RegisterHook("com_vtable", methodName, [ifaceName, i](CpuContext& ctx, MemoryManager&) -> u64 {
+    if (found != s_vtables.end()) {
+        vtableAddr = found->second;
+    } else {
+        vtableAddr = mem.Allocate(numSlots * 8, MemoryProtection::ReadWrite);
+        for (size_t i = 0; i < numSlots; ++i) {
+            std::string methodName = ifaceName + "::Slot_" + std::to_string(i);
+            kernel.RegisterHook("com_vtable", methodName, [ifaceName, i](CpuContext&, MemoryManager&) -> u64 {
                 LOG_WARN("COM", ifaceName + "::Slot_" + std::to_string(i) + " (offset 0x" +
                          std::to_string(i * 8) + ") unimplemented! Returning S_OK (0)");
                 return 0;
             });
+            GuestAddr tramp = kernel.GetOrCreateHookTrampoline("com_vtable", methodName);
+            mem.Write<GuestAddr>(vtableAddr + i * 8, tramp);
         }
-        GuestAddr tramp = kernel.GetOrCreateHookTrampoline("com_vtable", methodName);
-        mem.Write<GuestAddr>(vtableAddr + i * 8, tramp);
+        s_vtables[ifaceName] = vtableAddr;
     }
-    s_vtables[ifaceName] = vtableAddr;
+
+    // Apply any explicit overrides
+    for (const auto& [slotIdx, handler] : overrides) {
+        if (slotIdx < numSlots) {
+            std::string methodName = ifaceName + "::Slot_" + std::to_string(slotIdx);
+            kernel.RegisterHook("com_vtable", methodName, handler);
+            GuestAddr tramp = kernel.GetOrCreateHookTrampoline("com_vtable", methodName);
+            mem.Write<GuestAddr>(vtableAddr + slotIdx * 8, tramp);
+        }
+    }
     return vtableAddr;
 }
 
@@ -1133,14 +1141,193 @@ void RegisterD3D12X(HleKernel& kernel) {
                         {9, [](CpuContext&, MemoryManager&) -> u64 { return s_resourceBuffer; }},
                     });
                 }
+                static GuestAddr s_d3d12CommandQueueObj = 0;
+                if (!s_d3d12CommandQueueObj) {
+                    s_d3d12CommandQueueObj = CreateComObject(kernel, mem, "ID3D12CommandQueue", 64, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                        // 10 (0x50): ExecuteCommandLists
+                        {10, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 14 (0x70): Signal
+                        {14, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 15 (0x78): Wait
+                        {15, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 16 (0x80): GetTimestampFrequency (standard D3D12)
+                        {16, [](CpuContext& c, MemoryManager& m) -> u64 {
+                            if (c.rdx) {
+                                m.Write<u64>(c.rdx, 100000000ULL); // 100 MHz GPU clock frequency
+                            }
+                            return 0; // S_OK
+                        }},
+                        // 18 (0x90): GetTimestampFrequency (Scarlett layout)
+                        {18, [](CpuContext& c, MemoryManager& m) -> u64 {
+                            if (c.rdx) {
+                                m.Write<u64>(c.rdx, 100000000ULL); // 100 MHz GPU clock frequency
+                            }
+                            return 0; // S_OK
+                        }},
+                    });
+                }
+                static GuestAddr s_cmdAlloc = 0;
+                if (!s_cmdAlloc) {
+                    s_cmdAlloc = CreateComObject(kernel, mem, "ID3D12CommandAllocator", 32, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                        {8, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // Reset
+                    });
+                }
+                static GuestAddr s_cmdList = 0;
+                if (!s_cmdList) {
+                    s_cmdList = CreateComObject(kernel, mem, "ID3D12GraphicsCommandList", 128, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                        {9, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},  // Close
+                        {10, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // Reset
+                    });
+                }
+                static GuestAddr s_descHeap = 0;
+                if (!s_descHeap) {
+                    s_descHeap = CreateComObject(kernel, mem, "ID3D12DescriptorHeap", 32, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                        {8, [](CpuContext&, MemoryManager&) -> u64 { return 0x20000000; }},
+                        {9, [](CpuContext&, MemoryManager&) -> u64 { return 0x20000000; }},
+                    });
+                }
+                static GuestAddr s_rootSig = 0;
+                if (!s_rootSig) {
+                    s_rootSig = CreateComObject(kernel, mem, "ID3D12RootSignature", 32, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                    });
+                }
+                static GuestAddr s_fenceObj = 0;
+                if (!s_fenceObj) {
+                    s_fenceObj = CreateComObject(kernel, mem, "ID3D12Fence", 32, {
+                        {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                        {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                        {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                        {8, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // GetCompletedValue
+                        {9, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // SetEventOnCompletion
+                        {10, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // Signal
+                    });
+                }
                 g_d3d12DeviceObj = CreateComObject(kernel, mem, "ID3D12Device", 256, {
                     {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
                     {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
                     {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
-                    // 7 (0x38): if called on device
+                    // 7 (0x38): GetNodeCount
                     {7, [](CpuContext& c, MemoryManager& m) -> u64 {
                         if (c.rdx) m.Write<GuestAddr>(c.rdx, g_d3d12ResourceObj);
-                        return 0;
+                        return 1;
+                    }},
+                    // 8 (0x40): CreateCommandQueue(pDesc, riid, ppCommandQueue)
+                    {8, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppCommandQueue = c.r9;
+                        LOG_INFO("D3D12X", "ID3D12Device::CreateCommandQueue(slot 8): ppCommandQueue=0x" + std::to_string(ppCommandQueue));
+                        if (ppCommandQueue) {
+                            m.Write<GuestAddr>(ppCommandQueue, s_d3d12CommandQueueObj);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 9 (0x48): CreateCommandAllocator(type, riid, ppCommandAllocator)
+                    {9, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppAlloc = c.r9;
+                        LOG_INFO("D3D12X", "ID3D12Device::CreateCommandAllocator(slot 9): ppAlloc=0x" + std::to_string(ppAlloc));
+                        if (ppAlloc) {
+                            m.Write<GuestAddr>(ppAlloc, s_cmdAlloc);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 12 (0x60): CreateCommandList(nodeMask, type, pAllocator, pInitialState, riid, ppCommandList)
+                    {12, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppList = m.Read<GuestAddr>(c.rsp + 0x38);
+                        if (!ppList) ppList = m.Read<GuestAddr>(c.rsp + 0x30);
+                        LOG_INFO("D3D12X", "ID3D12Device::CreateCommandList(slot 12): ppList=0x" + std::to_string(ppList));
+                        if (ppList) {
+                            m.Write<GuestAddr>(ppList, s_cmdList);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 14 (0x70): CreateDescriptorHeap(pDesc, riid, ppvHeap)
+                    {14, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppHeap = c.r9;
+                        if (ppHeap) {
+                            m.Write<GuestAddr>(ppHeap, s_descHeap);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 15 (0x78): GetDescriptorHandleIncrementSize(DescriptorHeapType)
+                    {15, [](CpuContext&, MemoryManager&) -> u64 {
+                        return 32; // Standard descriptor increment
+                    }},
+                    // 16 (0x80): CreateRootSignature(nodeMask, pBlob, len, riid, ppvRootSig)
+                    {16, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppRootSig = m.Read<GuestAddr>(c.rsp + 0x28);
+                        if (!ppRootSig) ppRootSig = c.r9;
+                        if (ppRootSig) {
+                            m.Write<GuestAddr>(ppRootSig, s_rootSig);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 24 (0xc0): CreateCommandQueue (legacy slot alias)
+                    {24, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppCommandQueue = c.r9;
+                        LOG_INFO("D3D12X", "ID3D12Device::CreateCommandQueue(slot 24): ppCommandQueue=0x" + std::to_string(ppCommandQueue));
+                        if (ppCommandQueue) {
+                            m.Write<GuestAddr>(ppCommandQueue, s_d3d12CommandQueueObj);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 25 (0xc8): GetResourceAllocationInfo(visibleMask, numDescs, pDescs)
+                    {25, [](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr pInfo = (c.rcx != g_d3d12DeviceObj && c.rcx != 0) ? c.rcx : c.rdx;
+                        if (pInfo) {
+                            m.Write<u64>(pInfo, 0x100000ULL);  // SizeInBytes = 1 MB
+                            m.Write<u64>(pInfo + 8, 65536ULL); // Alignment = 64 KB
+                        }
+                        return pInfo;
+                    }},
+                    // 27 (0xd8): CreateCommandAllocator (legacy slot alias) / CreateCommittedResource
+                    {27, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppAlloc = c.r9;
+                        if (ppAlloc) {
+                            m.Write<GuestAddr>(ppAlloc, s_cmdAlloc);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 36 (0x120): CreateFence(InitialValue, Flags, riid, ppFence)
+                    {36, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppFence = c.r9;
+                        if (ppFence) {
+                            m.Write<GuestAddr>(ppFence, s_fenceObj);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 39 (0x138): CreateDescriptorHeap(pDesc, riid, ppvHeap) (legacy alias)
+                    {39, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppHeap = c.r9;
+                        if (ppHeap) {
+                            m.Write<GuestAddr>(ppHeap, s_descHeap);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 61 (0x1e8): CreateRootSignature (legacy alias)
+                    {61, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr ppRootSig = m.Read<GuestAddr>(c.rsp + 0x28);
+                        if (ppRootSig) {
+                            m.Write<GuestAddr>(ppRootSig, s_rootSig);
+                        }
+                        return 0; // S_OK
+                    }},
+                    // 70 (0x230): ID3D12Device::Slot_70
+                    {70, [](CpuContext&, MemoryManager&) -> u64 {
+                        return 0; // S_OK
                     }},
                     // 73 (0x248): CreateCommittedResource(pHeapProps, HeapFlags, pDesc, InitialState, pClearValue, riid, ppvResource)
                     {73, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
@@ -1166,6 +1353,33 @@ void RegisterD3D12X(HleKernel& kernel) {
     };
     kernel.RegisterHook("d3d12_xs.dll", "D3D12XboxCreateDevice", xboxCreateDeviceHandler);
     kernel.RegisterHook("d3d12_x.dll", "D3D12XboxCreateDevice", xboxCreateDeviceHandler);
+
+    // Xbox Graphics Library (xg_xs.dll / xg_x.dll)
+    auto xgCreateTextureComputerHandler = [&kernel](CpuContext& ctx, MemoryManager& m) -> u64 {
+        GuestAddr pDesc = ctx.rcx;
+        GuestAddr ppComputer = ctx.rdx;
+        LOG_INFO("XG", "XGCreateTextureComputer called: pDesc=0x" + std::to_string(pDesc) +
+                 ", ppComputer=0x" + std::to_string(ppComputer));
+        if (ppComputer) {
+            static GuestAddr s_xgTextureComputerObj = 0;
+            if (!s_xgTextureComputerObj) {
+                s_xgTextureComputerObj = CreateComObject(kernel, m, "IXGTextureComputer", 64, {
+                    {0, [](CpuContext& c, MemoryManager& mem) -> u64 { if (c.r8) mem.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
+                    {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
+                    {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
+                    // Slot 8 (0x40): CopyIntoSubresource / ComputeSubresourceLayout
+                    {8, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                });
+            }
+            m.Write<GuestAddr>(ppComputer, s_xgTextureComputerObj);
+            LOG_INFO("XG", "Bridged IXGTextureComputer at 0x" + std::to_string(s_xgTextureComputerObj));
+        }
+        return 0; // S_OK
+    };
+    kernel.RegisterHook("xg_xs.dll", "XGCreateTextureComputer", xgCreateTextureComputerHandler);
+    kernel.RegisterHook("xg_x.dll", "XGCreateTextureComputer", xgCreateTextureComputerHandler);
+    kernel.RegisterHook("xg_xs.dll", "XGSuggestSwizzleMode", [](CpuContext&, MemoryManager&) -> u64 { return 0; });
+    kernel.RegisterHook("xg_x.dll", "XGSuggestSwizzleMode", [](CpuContext&, MemoryManager&) -> u64 { return 0; });
 }
 
 } // namespace Scarlett::Modules

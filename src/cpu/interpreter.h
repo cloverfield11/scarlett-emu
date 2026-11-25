@@ -51,6 +51,7 @@ enum class OpcodeType {
     Bt,
     Cpuid,
     Xgetbv,
+    Clzero,
     Cmpxchg,
     Cmpxchg16b,
     Cmpxchg8b,

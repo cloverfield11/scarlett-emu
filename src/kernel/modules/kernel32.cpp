@@ -4055,6 +4055,18 @@ void RegisterKernel32(HleKernel& kernel) {
         }
         return 0;
     });
+    kernel.RegisterHook("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsscanf", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        // int __stdio_common_vsscanf(options, input, length, format, locale, valist)
+        GuestAddr inputAddr = ctx.rdx;
+        GuestAddr fmtAddr = ctx.r9;
+        const char* input = inputAddr ? reinterpret_cast<const char*>(mem.Translate(inputAddr)) : nullptr;
+        const char* fmt = fmtAddr ? reinterpret_cast<const char*>(mem.Translate(fmtAddr)) : nullptr;
+        if (!input || !fmt) return 0;
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vswscanf", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
     kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "terminate", [](CpuContext&, MemoryManager&) -> u64 {
         s_processExited = true;
         return 0;
@@ -4062,6 +4074,187 @@ void RegisterKernel32(HleKernel& kernel) {
     kernel.RegisterHook("api-ms-win-crt-runtime-l1-1-0.dll", "abort", [](CpuContext&, MemoryManager&) -> u64 {
         s_processExited = true;
         return 0;
+    });
+
+    // CRT Conversion hooks (api-ms-win-crt-convert-l1-1-0.dll)
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "atoi", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        return static_cast<u64>(static_cast<int64_t>(std::atoi(s)));
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "atof", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        double val = std::atof(s);
+        std::memcpy(&ctx.ymm[0].qwords[0], &val, sizeof(double));
+        u64 bits = 0;
+        std::memcpy(&bits, &val, sizeof(double));
+        return bits;
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "atoll", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        return static_cast<u64>(std::atoll(s));
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "strtol", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        long val = std::strtol(s, &end, static_cast<int>(ctx.r8));
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        return static_cast<u64>(static_cast<int64_t>(val));
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "strtoll", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        long long val = std::strtoll(s, &end, static_cast<int>(ctx.r8));
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        return static_cast<u64>(val);
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "_strtoi64", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        long long val = std::strtoll(s, &end, static_cast<int>(ctx.r8));
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        return static_cast<u64>(val);
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "strtoul", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        unsigned long val = std::strtoul(s, &end, static_cast<int>(ctx.r8));
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        return static_cast<u64>(val);
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "strtoull", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        unsigned long long val = std::strtoull(s, &end, static_cast<int>(ctx.r8));
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        return static_cast<u64>(val);
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "_strtoui64", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        unsigned long long val = std::strtoull(s, &end, static_cast<int>(ctx.r8));
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        return static_cast<u64>(val);
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "strtod", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        double val = std::strtod(s, &end);
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        std::memcpy(&ctx.ymm[0].qwords[0], &val, sizeof(double));
+        u64 bits = 0;
+        std::memcpy(&bits, &val, sizeof(double));
+        return bits;
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "strtof", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr strAddr = ctx.rcx;
+        if (!strAddr) return 0;
+        const char* s = reinterpret_cast<const char*>(mem.Translate(strAddr));
+        if (!s) return 0;
+        char* end = nullptr;
+        float val = std::strtof(s, &end);
+        if (ctx.rdx && end) {
+            u64 endAddr = strAddr + static_cast<u64>(end - s);
+            mem.Write<u64>(ctx.rdx, endAddr);
+        }
+        std::memcpy(&ctx.ymm[0].qwords[0], &val, sizeof(float));
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-convert-l1-1-0.dll", "_itoa", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
+        GuestAddr bufAddr = ctx.rdx;
+        if (!bufAddr) return 0;
+        char* buf = reinterpret_cast<char*>(mem.Translate(bufAddr));
+        if (!buf) return 0;
+        int val = static_cast<int>(ctx.rcx);
+        int radix = static_cast<int>(ctx.r8);
+        if (radix == 10) {
+            std::snprintf(buf, 32, "%d", val);
+        } else if (radix == 16) {
+            std::snprintf(buf, 32, "%x", static_cast<unsigned int>(val));
+        } else {
+            std::snprintf(buf, 32, "%d", val);
+        }
+        return bufAddr;
+    });
+
+    // CRT Filesystem hooks (api-ms-win-crt-filesystem-l1-1-0.dll)
+    kernel.RegisterHook("api-ms-win-crt-filesystem-l1-1-0.dll", "_lock_file", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-filesystem-l1-1-0.dll", "_unlock_file", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+    kernel.RegisterHook("api-ms-win-crt-filesystem-l1-1-0.dll", "_wstat64", [](CpuContext&, MemoryManager&) -> u64 {
+        return static_cast<u64>(-1); // not found
+    });
+    kernel.RegisterHook("api-ms-win-crt-filesystem-l1-1-0.dll", "remove", [](CpuContext&, MemoryManager&) -> u64 {
+        return 0;
+    });
+
+    // CRT Locale hooks (api-ms-win-crt-locale-l1-1-0.dll)
+    kernel.RegisterHook("api-ms-win-crt-locale-l1-1-0.dll", "localeconv", [](CpuContext&, MemoryManager& mem) -> u64 {
+        static GuestAddr s_lconvAddr = 0;
+        if (!s_lconvAddr) {
+            s_lconvAddr = mem.Allocate(sizeof(struct lconv) + 64, MemoryProtection::ReadWrite);
+            void* p = mem.Translate(s_lconvAddr);
+            if (p) {
+                struct lconv* hostLc = std::localeconv();
+                if (hostLc) {
+                    std::memcpy(p, hostLc, sizeof(struct lconv));
+                }
+            }
+        }
+        return s_lconvAddr;
     });
 
     // Standard CRT memory & string hooks
