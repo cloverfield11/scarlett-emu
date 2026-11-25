@@ -2845,6 +2845,13 @@ bool Interpreter::Step() {
         m_ctx.rip = 0x14223745aULL;
         return true;
     }
+    if (currentRip == 0x1419b4e60ULL) {
+        static u64 s_renderFrameIter = 0;
+        ++s_renderFrameIter;
+        if (s_renderFrameIter <= 10 || (s_renderFrameIter % 60 == 0)) {
+            LOG_INFO("Core", "RAGE render pump executing frame #" + std::to_string(s_renderFrameIter) + " on tid=1022!");
+        }
+    }
     if (currentRip == 0x1423cef45ULL || currentRip == 0x1423cef47ULL) {
         // Engine init synchronization gate: break out of wait loop into main frame render loop
         LOG_INFO("Core", "Engine init sync gate reached at RIP=0x1423cef45 -> breaking out to render loop at 0x1423cef55");
@@ -2852,17 +2859,20 @@ bool Interpreter::Step() {
         return true;
     }
     if (currentRip == 0x142a8b704ULL || currentRip == 0x142a8b70aULL || currentRip == 0x142a8b70cULL || currentRip == 0x142a8b718ULL) {
-        // Video/Graphics readiness spin-gate: break out to render thread continuation at 0x142a8b71a
+        // Video/Graphics readiness spin-gate: only break out once the graphics subsystem is initialized (rcx != 0 && rdx != 0)
         u64 valRcx = m_memory.Read<u64>(0x147bc7f80ULL);
         u64 valRdx = m_memory.Read<u64>(0x147bc7f88ULL);
         u8 valFlag = m_memory.Read<u8>(0x147bc7f90ULL);
-        std::stringstream ss;
-        ss << "Graphics readiness gate reached at RIP=0x" << std::hex << currentRip
-           << " [flag=0x" << (u32)valFlag << " rcx=0x" << valRcx << " rdx=0x" << valRdx << "] -> breaking out to 0x142a8b71a";
-        LOG_INFO("Core", ss.str());
-        m_ctx.rax |= 1;
-        m_ctx.rip = 0x142a8b71aULL;
-        return true;
+        if (valFlag & 1) {
+            std::stringstream ss;
+            ss << "Graphics readiness gate reached at RIP=0x" << std::hex << currentRip
+               << " [flag=0x" << (u32)valFlag << " rcx=0x" << valRcx << " rdx=0x" << valRdx << "] -> breaking out to 0x142a8b71a";
+            LOG_INFO("Core", ss.str());
+            m_ctx.rax |= 1;
+            m_ctx.rip = 0x142a8b71aULL;
+            return true;
+        }
+        // Not ready yet: execute normal spin/Sleep loop
     }
     if ((currentRip == 0x1424841a3ULL || currentRip == 0x1424841a6ULL) && m_ctx.rcx == 0) {
         // ID3D12CommandQueue::GetTimestampFrequency fallback when uninitialized

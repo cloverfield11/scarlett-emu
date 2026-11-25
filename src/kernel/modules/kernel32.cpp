@@ -642,6 +642,17 @@ static void EnsureGlobalBuffers(MemoryManager& mem) {
     mem.Write<u64>(argvArray + 8, 0);
 }
 
+u64 CreateEventHandle(bool manualReset, bool initialState) {
+    u64 handle = ++s_handleCounter;
+    SyncObject obj{};
+    obj.kind = SyncKind::Event;
+    obj.manualReset = manualReset;
+    obj.signaled = initialState;
+    s_syncObjects[handle] = obj;
+    if (initialState) s_syncSignalEpoch++;
+    return handle;
+}
+
 bool SignalEventHandle(u64 handle) {
     auto it = s_syncObjects.find(handle);
     if (it != s_syncObjects.end()) {

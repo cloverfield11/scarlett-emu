@@ -343,6 +343,16 @@ int main(int argc, char* argv[]) {
         if (instrSinceRender >= 1000000 || idleSwitches >= 4096) {
             instrSinceRender = 0;
             idleSwitches = 0;
+
+            // Signal frame event to wake RAGE render pump thread (tid=1022)
+            Scarlett::GuestAddr renderCtx = memory.Read<Scarlett::GuestAddr>(0x147bc7f88ULL);
+            if (renderCtx) {
+                Scarlett::u64 frameEvt = memory.Read<Scarlett::u64>(renderCtx + 0xa41a0ULL);
+                if (frameEvt) {
+                    Scarlett::Modules::SignalEventHandle(frameEvt);
+                }
+            }
+
             if (batchLimit == 0 || enableWindowInBatch) {
                 gpu.RenderFrame();
                 gpu.PollEvents();

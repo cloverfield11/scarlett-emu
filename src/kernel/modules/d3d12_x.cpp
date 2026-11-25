@@ -1474,9 +1474,24 @@ void RegisterD3D12X(HleKernel& kernel) {
             }
 
             // Set video/graphics subsystem ready flag for RAGE render thread (0x147bc7f93)
+            static GuestAddr s_rageRenderContext = 0;
+            if (!s_rageRenderContext) {
+                s_rageRenderContext = mem.Allocate(0x100000, MemoryProtection::ReadWrite);
+                if (s_rageRenderContext) {
+                    // Frame sync event handle at [rsi + 0xa41a0]
+                    u64 frameEvent = CreateEventHandle(false, true); // initially signaled
+                    mem.Write<u64>(s_rageRenderContext + 0xa41a0ULL, frameEvent);
+                    // Active render loop flag at [rsi + 0xa41a8] = 1 (keep running frame pump)
+                    mem.Write<u8>(s_rageRenderContext + 0xa41a8ULL, 1);
+                }
+            }
+            if (s_rageRenderContext) {
+                mem.Write<GuestAddr>(0x147bc7f88ULL, s_rageRenderContext);
+                mem.Write<GuestAddr>(0x147bc7f80ULL, s_rageRenderContext);
+            }
             mem.Write<u8>(0x147bc7f93ULL, 1);
             mem.Write<u8>(0x147bc7f90ULL, 1);
-            LOG_INFO("D3D12X", "Initialized RAGE graphics readiness flag at 0x147bc7f90/93 = 1");
+            LOG_INFO("D3D12X", "Initialized RAGE graphics context at 0x147bc7f88 and readiness flag at 0x147bc7f90 = 1");
         }
 
         return 0; // S_OK

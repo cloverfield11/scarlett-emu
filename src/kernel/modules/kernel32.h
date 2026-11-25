@@ -34,6 +34,7 @@ struct GuestThread {
 };
 
 u64 GetSyncSignalEpoch();
+u64 CreateEventHandle(bool manualReset, bool initialState);
 bool SignalEventHandle(u64 handle);
 bool ResetEventHandle(u64 handle);
 
