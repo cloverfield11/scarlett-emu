@@ -1141,6 +1141,12 @@ void RegisterD3D12X(HleKernel& kernel) {
                         {8, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
                         // 9 (0x48): ID3D12Resource::GetGPUVirtualAddress
                         {9, [](CpuContext&, MemoryManager&) -> u64 { return s_resourceBuffer; }},
+                        // 21 (0xa8): ID3D12Resource::WriteToSubresource / Xbox extension
+                        {21, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 131 (0x418): Xbox Series X/S GpuPlacement / SubresourceInfo
+                        {131, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
+                        // 132 (0x420): Xbox Series X/S TextureDescriptor / Layout
+                        {132, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
                     });
                 }
                 static GuestAddr s_d3d12CommandQueueObj = 0;
@@ -1319,6 +1325,18 @@ void RegisterD3D12X(HleKernel& kernel) {
                         }
                         return pInfo;
                     }},
+                    // 26 (0xd0): GetCustomHeapProperties(nodeIndex, heapType)
+                    {26, [](CpuContext& c, MemoryManager& m) -> u64 {
+                        GuestAddr pProps = c.r8 ? c.r8 : c.rdx;
+                        if (pProps) {
+                            m.Write<u32>(pProps + 0, 1); // D3D12_HEAP_TYPE_DEFAULT
+                            m.Write<u32>(pProps + 4, 1); // D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE
+                            m.Write<u32>(pProps + 8, 1); // D3D12_MEMORY_POOL_L1
+                            m.Write<u32>(pProps + 12, 1);
+                            m.Write<u32>(pProps + 16, 1);
+                        }
+                        return pProps;
+                    }},
                     // 27 (0xd8): CreateCommandAllocator (legacy slot alias) / CreateCommittedResource
                     {27, [&kernel, &mem](CpuContext& c, MemoryManager& m) -> u64 {
                         GuestAddr ppAlloc = c.r9;
@@ -1341,6 +1359,10 @@ void RegisterD3D12X(HleKernel& kernel) {
                         if (ppHeap) {
                             m.Write<GuestAddr>(ppHeap, s_descHeap);
                         }
+                        return 0; // S_OK
+                    }},
+                    // 48 (0x180): SetStablePowerState / DeviceExtension
+                    {48, [](CpuContext&, MemoryManager&) -> u64 {
                         return 0; // S_OK
                     }},
                     // 61 (0x1e8): CreateRootSignature (legacy alias)
@@ -1369,8 +1391,16 @@ void RegisterD3D12X(HleKernel& kernel) {
                         }
                         return 0; // S_OK
                     }},
+                    // 78 (0x270): SetResidencyPriority / WaitFrameEvent companion
+                    {78, [](CpuContext&, MemoryManager&) -> u64 {
+                        return 0; // S_OK
+                    }},
                     // 79 (0x278): WaitFrameEventX / FramePacing
                     {79, [](CpuContext&, MemoryManager&) -> u64 {
+                        return 0; // S_OK
+                    }},
+                    // 86 (0x2b0): Xbox Series Extension / FramePacing info
+                    {86, [](CpuContext&, MemoryManager&) -> u64 {
                         return 0; // S_OK
                     }},
                     // 108 (0x360): SetFramePacingX / Enable

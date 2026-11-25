@@ -1,10 +1,12 @@
 #include "cpu/memory_manager.h"
+#include "kernel/hle_kernel.h"
 #include "common/logging.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <dlfcn.h>
 
 namespace Scarlett {
 
@@ -46,6 +48,18 @@ GuestAddr MemoryManager::Allocate(u64 size, MemoryProtection protection, GuestAd
         return 0;
     }
 
+    if (size >= 0x100000000ULL) {
+        Dl_info dlinfo{};
+        dladdr(__builtin_return_address(0), &dlinfo);
+        std::string currentHook = HleKernel::GetCurrentExecutingHook();
+        std::stringstream ss;
+        ss << "Huge Allocate call: size=0x" << std::hex << size << " preferred=0x" << preferredBase
+           << " hook=" << (currentHook.empty() ? "<none>" : currentHook)
+           << " caller=" << (dlinfo.dli_sname ? dlinfo.dli_sname : "unknown")
+           << " (" << __builtin_return_address(0) << ")";
+        LOG_WARN("Memory", ss.str());
+    }
+
     // Align to 64KB page allocation granularity (standard for Windows / GameOS)
     u64 alignedSize = (size + 0xFFFF) & ~0xFFFFULL;
 
@@ -71,10 +85,17 @@ GuestAddr MemoryManager::Allocate(u64 size, MemoryProtection protection, GuestAd
 
         if (guestAddr == 0) {
             if (alignedSize > m_totalSize || m_nextAllocOffset > (m_totalSize - alignedSize)) {
+                Dl_info dlinfo{};
+                dladdr(__builtin_return_address(0), &dlinfo);
+                std::string currentHook = HleKernel::GetCurrentExecutingHook();
                 std::stringstream ss;
                 ss << "Out of guest memory arena (req=0x" << std::hex << alignedSize
+                   << ", preferredBase=0x" << preferredBase
+                   << ", hook=" << (currentHook.empty() ? "<none>" : currentHook)
                    << ", top=0x" << m_nextAllocOffset << ", max=0x" << m_totalSize
-                   << ", freeRegions=" << std::dec << m_freeRegions.size() << ")";
+                   << ", freeRegions=" << std::dec << m_freeRegions.size()
+                   << ", caller=" << (dlinfo.dli_sname ? dlinfo.dli_sname : "unknown")
+                   << " (" << __builtin_return_address(0) << "))";
                 LOG_WARN("Memory", ss.str());
                 return 0;
             }

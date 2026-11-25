@@ -391,9 +391,28 @@ static std::string ResolveGuestPath(const std::string& guestPath) {
     }
     if (lower.rfind("c:/game/", 0) == 0) {
         path = path.substr(8);
-    } else if (path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':' && path[2] == '/') {
-        // Strip other drive letters (e.g. "C:/", "D:/")
-        path = path.substr(3);
+    } else {
+        // Handle VFS device names like "common:/", "platform:/", "title:/", or drive letters "C:/"
+        size_t colonPos = path.find(':');
+        if (colonPos != std::string::npos && colonPos > 0) {
+            if (colonPos == 1 && std::isalpha(static_cast<unsigned char>(path[0]))) {
+                // Strip drive letter (e.g. "C:/", "D:/")
+                if (colonPos + 1 < path.size() && path[colonPos + 1] == '/') {
+                    path = path.substr(colonPos + 2);
+                } else {
+                    path = path.substr(colonPos + 1);
+                }
+            } else if (colonPos + 1 < path.size() && path[colonPos + 1] == '/') {
+                // Multi-character VFS device (e.g. "common:/data" -> "common/data", "title:/x" -> "x")
+                std::string dev = ToLowerAscii(path.substr(0, colonPos));
+                std::string rest = path.substr(colonPos + 2);
+                if (dev == "title" || dev == "root") {
+                    path = rest;
+                } else {
+                    path = dev + "/" + rest;
+                }
+            }
+        }
     }
 
     // Remove redundant leading slashes or "./"
@@ -4551,10 +4570,32 @@ void RegisterKernel32(HleKernel& kernel) {
         return 1;
     });
     kernel.RegisterHook("xmem.dll", "XMemAllocatePhysicalPages", [](CpuContext& ctx, MemoryManager& mem) -> u64 {
-        u64 size = ctx.rdx;
-        if (size == 0) return 0;
-        size = (size + 0xFFF) & ~0xFFFULL;
-        return mem.Allocate(size, MemoryProtection::ReadWrite);
+        u64 retRip = ctx.rsp ? mem.Read<u64>(ctx.rsp) : 0;
+        std::stringstream ss;
+        ss << "XMemAllocatePhysicalPages: rcx=0x" << std::hex << ctx.rcx
+           << " rdx=0x" << ctx.rdx
+           << " r8=0x" << ctx.r8
+           << " r9=0x" << ctx.r9
+           << " caller=0x" << retRip;
+        LOG_INFO("Kernel", ss.str());
+
+        // Determine actual size vs flags based on register values
+        u64 size = 0;
+        if (ctx.rcx > 0 && ctx.rcx < 0x100000000ULL && ctx.rdx >= 0x100000000ULL) {
+            // rcx is size, rdx is pointer/flags
+            size = ctx.rcx;
+        } else if (ctx.rdx > 0 && ctx.rdx < 0x100000000ULL) {
+            size = ctx.rdx;
+        } else if (ctx.rcx > 0 && ctx.rcx < 0x100000000ULL) {
+            size = ctx.rcx;
+        } else {
+            size = 65536; // 64KB safe fallback
+        }
+
+        size = (size + 0xFFFF) & ~0xFFFFULL;
+        GuestAddr addr = mem.Allocate(size, MemoryProtection::ReadWrite);
+        LOG_INFO("Kernel", "XMemAllocatePhysicalPages: allocated size=0x" + std::to_string(size) + " at 0x" + std::to_string(addr));
+        return addr;
     });
     kernel.RegisterHook("xmem.dll", "XMemFreePhysicalPages", [](CpuContext&, MemoryManager&) -> u64 {
         return 1;

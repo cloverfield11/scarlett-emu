@@ -38,6 +38,7 @@ public:
     bool ShouldYield() const { return m_yieldRequested; }
     bool ShouldRetryOnWake() const { return m_retryOnWake; }
     std::vector<std::pair<std::string, u64>> GetTopCallStats(size_t limit = 15) const;
+    static std::string GetCurrentExecutingHook();
 
 private:
     void RegisterDefaultModules();

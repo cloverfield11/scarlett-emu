@@ -48,36 +48,41 @@ Execute the binary through the AMD Zen 2 CPU interpreter:
 
 ---
 
-## 3. Current Emulation Milestone: 91.5M+ Instructions
+## 3. Current Emulation Milestone: 5,000,000,000+ (5 BILLION) Instructions
 
-ScarlettEmu has cleanly executed **91,519,789 instructions** from cold boot, completing entire core engine bootstrap phases:
+ScarlettEmu has cleanly executed **5,000,157,047 instructions** (5 BILLION instructions) from cold boot, sustaining an emulation throughput of **~125–129 MIPS** across **21 concurrent guest threads**:
 
 ```
 [INFO] [Core] ScarlettEmu subsystems initialized on Apple Silicon ARM64
 [INFO] [Memory] Unified GDDR6 Virtual Memory initialized: 128 GB allocated
 [INFO] [Loader] Ingesting 'game_scarlett_master.exe' (ImageBase: 0x140000000, Size: 0x7655000)
-[INFO] [Loader] Resolving PE TLS Directory (RVA: 0x6e08b00, Size: 0x28)
-[INFO] [Kernel] Registered HLE Hooks for DirectStorage, D3D12, CRT, and Synchronization
-...
-[INFO] [Interpreter] Executed 91,519,789 instructions cleanly
+[INFO] [Kernel] Registered HLE Hooks for DirectStorage, D3D12, CRT, XMem, and Synchronization
+[INFO] [D3D12X] Bridged Xbox D3D12 Device and CommandQueue (PresentX, GetTimestampFrequency, WaitFrameEventX)
+[INFO] [Kernel] Lazy-initialized RAGE grcDeviceContext TLS block at 0x75898159104
+[INFO] [Core] Runtime: 126 FPS | Total: 4786M | Threads: 21 (run=1, wait=20) | tid=1020 RIP=0x14000a3d7
+[INFO] [Core] Batch execution limit reached (5000157047 instructions). Exiting loop cleanly.
 ```
 
 ### Key Subsystems Implemented:
 
-1. **PE Thread Local Storage (TLS) Handling:**
-   - The RAGE engine heavily utilizes static thread-local variables (`__declspec(thread)`).
-   - `PeLoader` parses `IMAGE_TLS_DIRECTORY64`, clears `AddressOfIndex` (`*0x146e08b2c = 0`), and deploys `.tls` raw template data into guest TEB structures (`gs:[0x58]`).
-2. **Extended AVX / AVX2 CPU Instructions:**
-   - Added Zen 2 vector instruction decoding and execution in `src/cpu/interpreter.cpp`:
-     * `VPERMILPS` (VEX 0F 3A 04 /r ib)
-     * `VPBLENDW` (VEX 0F 3A 0E /r ib)
-     * `VPBLENDD` (VEX 0F 3A 02 /r ib)
-     * `VMOVMSKPS` (256-bit YMM mask extraction)
-3. **DirectStorage & XCRDAPI HLE:**
-   - Intercepted `xcrdapi.dll!DStorageGetFactory` creating an `IDStorageFactory` COM bridge with 64 method slots.
-4. **Xbox Direct3D 12 Device & Buffer Allocations:**
-   - Intercepted `d3d12_xs.dll!D3D12XboxCreateDevice` provisioning an `ID3D12Device` interface.
-   - Handled `ID3D12Device::CreateCommittedResource` (slot 73) reading arguments at `RSP + 0x30` and returning an `ID3D12Resource` proxy with virtual GPU memory buffers.
+1. **AMD Zen 2 Native Instructions & AVX/AVX2:**
+   - Implemented AMD Zen 2 `CLZERO` (`0F 01 FC`) instruction decoding and execution to zero 64-byte cache lines aligned to `RAX`.
+   - Vector operations: `VPERMILPS`, `VPBLENDW`, `VPBLENDD`, `VMOVMSKPS`, `VCMPPS`, `VMULPS`, `VADDPS`.
+2. **PE Thread Local Storage (TLS) & RAGE Device Context:**
+   - Fully resolved PE TLS directory template parsing and initialization.
+   - Dynamic lazy-allocation and binding of the 384 KB RAGE `grcDeviceContext` structure at `%gs:0x58 -> 0x12a8(%rax)` upon first hardware graphics access.
+3. **Xbox Series X/S Presentation (`PresentX`) & D3D12 Bridging:**
+   - Console graphics does not use `dxgi.dll` swap chains; presentation occurs via `ID3D12CommandQueue::PresentX` at Slot 24 (`0xc0`).
+   - Mapped `ID3D12Device::CreateCommandQueue` at standard Slot 8 (`0x40`).
+   - Implemented `ID3D12CommandQueue::GetTimestampFrequency` returning 100 MHz GPU clock.
+   - Implemented Xbox device methods: `CreateConstantBufferView`, `CreateShaderResourceView`, `CreateUnorderedAccessView`, `CreateRenderTargetView`, `CreateDepthStencilView`, `CreateSampler`, `GetResourceAllocationInfo`, `GetCustomHeapProperties`, `SetStablePowerState`, `SetResidencyPriority`, `WaitFrameEventX`, `SetFramePacingX`.
+4. **Physical Memory Management (`xmem.dll`):**
+   - Corrected Xbox fastcall argument unpacking for `XMemAllocatePhysicalPages` (`dwSize` in `RCX`, descriptor pointers in `RDX`).
+   - Managed 6.5 GB+ dynamic physical allocations via unified GDDR6 memory arena without exhaustion.
+5. **VFS Path Translation Normalization:**
+   - Seamlessly translates console pseudo-device paths (`common:\data\version.txt` -> `common/data/version.txt`, `platform:\...` -> `platform/...`, `title:\...` -> `...`).
+6. **Multi-Threaded Cooperative Job Scheduling:**
+   - 21 concurrent guest threads executing round-robin job distribution across RAGE's internal `sysJobManager`.
 
 ---
 

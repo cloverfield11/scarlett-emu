@@ -2921,12 +2921,18 @@ bool Interpreter::Step() {
             u8 vec = static_cast<u8>(inst.op1.imm);
             if (vec == 0x29) {
                 u64 fastFailCode = m_ctx.rcx;
-                LOG_ERROR("Interpreter", "__fastfail(0x" + std::to_string(fastFailCode) + ") invoked at RIP=0x" + std::to_string(currentRip));
+                std::stringstream ss;
+                ss << "__fastfail(0x" << std::hex << fastFailCode << ") invoked at RIP=0x" << currentRip;
+                LOG_ERROR("Interpreter", ss.str());
                 m_halted = true;
             } else if (vec == 3) {
-                LOG_INFO("Interpreter", "INT 3 breakpoint hit at RIP=0x" + std::to_string(currentRip));
+                std::stringstream ss;
+                ss << "INT 3 breakpoint hit at RIP=0x" << std::hex << currentRip;
+                LOG_INFO("Interpreter", ss.str());
             } else {
-                LOG_WARN("Interpreter", "INT " + std::to_string(vec) + " invoked at RIP=0x" + std::to_string(currentRip));
+                std::stringstream ss;
+                ss << "INT " << std::dec << static_cast<u32>(vec) << " invoked at RIP=0x" << std::hex << currentRip;
+                LOG_WARN("Interpreter", ss.str());
             }
             break;
         }

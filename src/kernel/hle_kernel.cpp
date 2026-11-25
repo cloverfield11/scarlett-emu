@@ -46,6 +46,12 @@ void HleKernel::RegisterHook(const std::string& moduleName, const std::string& f
     LOG_DEBUG("Kernel", "Registered HLE Hook: " + moduleName + " -> " + functionName);
 }
 
+static thread_local std::string s_currentExecutingHookKey;
+
+std::string HleKernel::GetCurrentExecutingHook() {
+    return s_currentExecutingHookKey;
+}
+
 bool HleKernel::ExecuteHook(const std::string& moduleName, const std::string& functionName, CpuContext& ctx) {
     std::string key = moduleName + "!" + functionName;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -53,7 +59,10 @@ bool HleKernel::ExecuteHook(const std::string& moduleName, const std::string& fu
     auto it = m_hooks.find(key);
     if (it != m_hooks.end()) {
         m_callCounts[key]++;
+        std::string prevHook = s_currentExecutingHookKey;
+        s_currentExecutingHookKey = key;
         u64 result = it->second(ctx, m_memory);
+        s_currentExecutingHookKey = prevHook;
         if (!(m_yieldRequested && m_retryOnWake)) {
             ctx.rax = result; // Fastcall return value in RAX
         }
@@ -73,7 +82,10 @@ bool HleKernel::ExecuteHook(const std::string& moduleName, const std::string& fu
         if (aliasIt != m_hooks.end()) {
             m_hooks[key] = aliasIt->second; // Cache resolved alias
             m_callCounts[aliasKey]++;
+            std::string prevHook = s_currentExecutingHookKey;
+            s_currentExecutingHookKey = aliasKey;
             u64 result = aliasIt->second(ctx, m_memory);
+            s_currentExecutingHookKey = prevHook;
             if (!(m_yieldRequested && m_retryOnWake)) {
                 ctx.rax = result;
             }
@@ -88,7 +100,10 @@ bool HleKernel::ExecuteHook(const std::string& moduleName, const std::string& fu
             regKey.compare(regKey.size() - funcSuffix.size(), funcSuffix.size(), funcSuffix) == 0) {
             m_hooks[key] = handler; // Cache alias
             m_callCounts[regKey]++;
+            std::string prevHook = s_currentExecutingHookKey;
+            s_currentExecutingHookKey = regKey;
             u64 result = handler(ctx, m_memory);
+            s_currentExecutingHookKey = prevHook;
             if (!(m_yieldRequested && m_retryOnWake)) {
                 ctx.rax = result;
             }
