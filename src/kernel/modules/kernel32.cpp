@@ -642,6 +642,32 @@ static void EnsureGlobalBuffers(MemoryManager& mem) {
     mem.Write<u64>(argvArray + 8, 0);
 }
 
+bool SignalEventHandle(u64 handle) {
+    auto it = s_syncObjects.find(handle);
+    if (it != s_syncObjects.end()) {
+        it->second.signaled = true;
+        s_syncSignalEpoch++;
+        return true;
+    }
+    // If unknown handle, register it as signaled event so WaitForSingleObject succeeds
+    SyncObject obj{};
+    obj.kind = SyncKind::Event;
+    obj.manualReset = true;
+    obj.signaled = true;
+    s_syncObjects[handle] = obj;
+    s_syncSignalEpoch++;
+    return true;
+}
+
+bool ResetEventHandle(u64 handle) {
+    auto it = s_syncObjects.find(handle);
+    if (it != s_syncObjects.end()) {
+        it->second.signaled = false;
+        return true;
+    }
+    return false;
+}
+
 void RegisterKernel32(HleKernel& kernel) {
     s_hleKernel = &kernel;
     s_processExited = false;
@@ -2153,6 +2179,22 @@ void RegisterKernel32(HleKernel& kernel) {
             cur.waiting = false;
             return 0x102ULL; // WAIT_TIMEOUT
         }
+        // In cooperative HLE emulation, if all other threads are waiting/sleeping, prevent deadlock on infinite task wait
+        if (cur.waitInfinite && (s_schedulerRound - cur.waitStartRound) >= 100) {
+            bool othersRunning = false;
+            for (size_t i = 0; i < s_threads.size(); ++i) {
+                if (i != s_activeThreadIdx && !s_threads[i].exited && !s_threads[i].suspended && !s_threads[i].waiting) {
+                    othersRunning = true;
+                    break;
+                }
+            }
+            if (!othersRunning) {
+                // All worker threads are waiting on semaphores or sleeping; fulfill wait to advance pipeline
+                cur.waiting = false;
+                ConsumeHandleSignal(handle, curTid);
+                return 0; // WAIT_OBJECT_0
+            }
+        }
         cur.waitObservedEpoch = s_syncSignalEpoch;
         if (s_hleKernel) s_hleKernel->RequestYield(true);
         return 0;
@@ -2705,10 +2747,31 @@ void RegisterKernel32(HleKernel& kernel) {
         s_threads.push_back(t);
         if (lpThreadId) mem.Write<u32>(lpThreadId, tid);
 
+        u64 caller = mem.Read<u64>(ctx.rsp);
+        u64 caller2 = mem.Read<u64>(ctx.rsp + 0x38); // caller's return address in caller's frame
         std::stringstream ss;
         ss << "CreateThread: handle=0x" << std::hex << handle << " tid=" << std::dec << tid
            << " start=0x" << std::hex << startAddr << " param=0x" << param
-           << " teb=0x" << tebAddr << " suspended=" << (t.suspended ? 1 : 0);
+           << " teb=0x" << tebAddr << " suspended=" << (t.suspended ? 1 : 0)
+           << " caller=0x" << caller << " caller2=0x" << caller2;
+
+        // If the game passes a thread parameter block (fn, arg, ...), allocate an isolated copy
+        // to prevent pool slot reuse/overwrite races between suspended worker threads
+        if (param && mem.Translate(param)) {
+            u64 pFn = mem.Read<u64>(param);
+            u64 pArg = mem.Read<u64>(param + 8);
+            ss << " [param fn=0x" << pFn << " arg=0x" << pArg << "]";
+
+            GuestAddr isolatedParam = mem.Allocate(0x80, MemoryProtection::ReadWrite);
+            if (isolatedParam) {
+                const void* srcData = mem.Translate(param);
+                void* dstData = mem.Translate(isolatedParam);
+                if (srcData && dstData) {
+                    std::memcpy(dstData, srcData, 0x80);
+                    t.ctx.rcx = isolatedParam;
+                }
+            }
+        }
         LOG_INFO("Kernel32", ss.str());
         return handle;
     });

@@ -34,6 +34,8 @@ struct GuestThread {
 };
 
 u64 GetSyncSignalEpoch();
+bool SignalEventHandle(u64 handle);
+bool ResetEventHandle(u64 handle);
 
 void SetPeLoader(PeLoader* loader);
 void SetGameRootDir(const std::string& path);

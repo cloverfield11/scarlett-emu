@@ -1,4 +1,5 @@
 #include "kernel/modules/d3d12_x.h"
+#include "kernel/modules/kernel32.h"
 #include "gpu/metal_renderer.h"
 #include "common/logging.h"
 #include <algorithm>
@@ -10,6 +11,21 @@
 namespace Scarlett::Modules {
 
 namespace {
+
+static u64 s_d3dFenceValue = 1;
+static std::vector<std::pair<u64, u64>> s_d3dPendingFenceEvents; // value, hEvent
+
+static void CheckFenceEvents(u64 currentVal) {
+    for (auto it = s_d3dPendingFenceEvents.begin(); it != s_d3dPendingFenceEvents.end(); ) {
+        if (currentVal >= it->first) {
+            LOG_INFO("D3D12X", "Fulfilling fence event on completion: handle=0x" + std::to_string(it->second) + " val=" + std::to_string(it->first));
+            SignalEventHandle(it->second);
+            it = s_d3dPendingFenceEvents.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
 
 std::string FormatGuid(MemoryManager& mem, GuestAddr guidAddr) {
     if (!guidAddr) return "NULL";
@@ -1155,11 +1171,27 @@ void RegisterD3D12X(HleKernel& kernel) {
                         {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
                         {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
                         {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
-                        // 10 (0x50): ExecuteCommandLists
-                        {10, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
-                        // 14 (0x70): Signal
-                        {14, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
-                        // 15 (0x78): Wait
+                        // 10 (0x50): ExecuteCommandLists(NumCommandLists, ppCommandLists)
+                        {10, [](CpuContext&, MemoryManager& m) -> u64 {
+                            // Any submitted GPU command list advances fence values and presents
+                            s_d3dFenceValue++;
+                            CheckFenceEvents(s_d3dFenceValue);
+                            ++g_d3dState.presentCount;
+                            if (g_d3dState.presentCount <= 10 || (g_d3dState.presentCount % 60 == 0)) {
+                                LOG_INFO("D3D12X", "ID3D12CommandQueue::ExecuteCommandLists/Present #" + std::to_string(g_d3dState.presentCount) +
+                                         " -> Presenting frame to Metal surface!");
+                            }
+                            PresentFrameToMetal(m);
+                            return 0;
+                        }},
+                        // 14 (0x70): Signal(pFence, Value)
+                        {14, [](CpuContext& c, MemoryManager&) -> u64 {
+                            u64 val = c.r8 ? c.r8 : c.rdx;
+                            if (val > s_d3dFenceValue) s_d3dFenceValue = val;
+                            CheckFenceEvents(s_d3dFenceValue);
+                            return 0; // S_OK
+                        }},
+                        // 15 (0x78): Wait(pFence, Value)
                         {15, [](CpuContext&, MemoryManager&) -> u64 { return 0; }},
                         // 16 (0x80): GetTimestampFrequency (standard D3D12)
                         {16, [](CpuContext& c, MemoryManager& m) -> u64 {
@@ -1232,9 +1264,29 @@ void RegisterD3D12X(HleKernel& kernel) {
                         {0, [](CpuContext& c, MemoryManager& m) -> u64 { if (c.r8) m.Write<GuestAddr>(c.r8, c.rcx); return 0; }},
                         {1, [](CpuContext&, MemoryManager&) -> u64 { return 2; }},
                         {2, [](CpuContext&, MemoryManager&) -> u64 { return 1; }},
-                        {8, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // GetCompletedValue
-                        {9, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // SetEventOnCompletion
-                        {10, [](CpuContext&, MemoryManager&) -> u64 { return 0; }}, // Signal
+                        // 8 (0x40): GetCompletedValue
+                        {8, [](CpuContext&, MemoryManager&) -> u64 { return s_d3dFenceValue; }},
+                        // 9 (0x48): SetEventOnCompletion(Value, hEvent)
+                        {9, [](CpuContext& c, MemoryManager&) -> u64 {
+                            u64 val = c.rdx;
+                            u64 hEvent = c.r8;
+                            LOG_INFO("D3D12X", "ID3D12Fence::SetEventOnCompletion: val=" + std::to_string(val) + " hEvent=0x" + std::to_string(hEvent));
+                            if (s_d3dFenceValue >= val) {
+                                SignalEventHandle(hEvent);
+                            } else {
+                                s_d3dPendingFenceEvents.push_back({val, hEvent});
+                                // Immediately signal since Scarlett GPU execution is synchronous
+                                SignalEventHandle(hEvent);
+                            }
+                            return 0; // S_OK
+                        }},
+                        // 10 (0x50): Signal(Value)
+                        {10, [](CpuContext& c, MemoryManager&) -> u64 {
+                            u64 val = c.rdx;
+                            if (val > s_d3dFenceValue) s_d3dFenceValue = val;
+                            CheckFenceEvents(s_d3dFenceValue);
+                            return 0; // S_OK
+                        }},
                     });
                 }
                 g_d3d12DeviceObj = CreateComObject(kernel, mem, "ID3D12Device", 256, {
@@ -1411,6 +1463,20 @@ void RegisterD3D12X(HleKernel& kernel) {
             }
             mem.Write<GuestAddr>(ppDevice, g_d3d12DeviceObj);
             LOG_INFO("D3D12X", "Bridged Xbox D3D12 Device at 0x" + std::to_string(g_d3d12DeviceObj));
+
+            MetalRenderer* renderer = GetMetalRenderer();
+            if (renderer) {
+                renderer->SetGameFrameActive(true);
+                renderer->SetClearColor(0.08f, 0.09f, 0.12f, 1.0f); // RAGE dark blue-gray presentation frame
+                renderer->CreateWindowAndPipeline();
+                renderer->RenderFrame();
+                renderer->PollEvents();
+            }
+
+            // Set video/graphics subsystem ready flag for RAGE render thread (0x147bc7f93)
+            mem.Write<u8>(0x147bc7f93ULL, 1);
+            mem.Write<u8>(0x147bc7f90ULL, 1);
+            LOG_INFO("D3D12X", "Initialized RAGE graphics readiness flag at 0x147bc7f90/93 = 1");
         }
 
         return 0; // S_OK

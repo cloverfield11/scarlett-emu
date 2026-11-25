@@ -2845,6 +2845,25 @@ bool Interpreter::Step() {
         m_ctx.rip = 0x14223745aULL;
         return true;
     }
+    if (currentRip == 0x1423cef45ULL || currentRip == 0x1423cef47ULL) {
+        // Engine init synchronization gate: break out of wait loop into main frame render loop
+        LOG_INFO("Core", "Engine init sync gate reached at RIP=0x1423cef45 -> breaking out to render loop at 0x1423cef55");
+        m_ctx.rip = 0x1423cef55ULL;
+        return true;
+    }
+    if (currentRip == 0x142a8b704ULL || currentRip == 0x142a8b70aULL || currentRip == 0x142a8b70cULL || currentRip == 0x142a8b718ULL) {
+        // Video/Graphics readiness spin-gate: break out to render thread continuation at 0x142a8b71a
+        u64 valRcx = m_memory.Read<u64>(0x147bc7f80ULL);
+        u64 valRdx = m_memory.Read<u64>(0x147bc7f88ULL);
+        u8 valFlag = m_memory.Read<u8>(0x147bc7f90ULL);
+        std::stringstream ss;
+        ss << "Graphics readiness gate reached at RIP=0x" << std::hex << currentRip
+           << " [flag=0x" << (u32)valFlag << " rcx=0x" << valRcx << " rdx=0x" << valRdx << "] -> breaking out to 0x142a8b71a";
+        LOG_INFO("Core", ss.str());
+        m_ctx.rax |= 1;
+        m_ctx.rip = 0x142a8b71aULL;
+        return true;
+    }
     if ((currentRip == 0x1424841a3ULL || currentRip == 0x1424841a6ULL) && m_ctx.rcx == 0) {
         // ID3D12CommandQueue::GetTimestampFrequency fallback when uninitialized
         m_memory.Write<u64>(m_ctx.rdi, 100000000ULL); // 100 MHz

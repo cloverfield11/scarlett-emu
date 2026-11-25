@@ -278,7 +278,10 @@ int main(int argc, char* argv[]) {
                     return nowMs >= t.waitDeadlineMs && (schedRound - t.waitStartRound) >= 1;
                 }
                 if (t.waitObservedEpoch != curEpoch) return true;
-                return !t.waitInfinite && nowMs >= t.waitDeadlineMs && (schedRound - t.waitStartRound) >= 1;
+                if (!t.waitInfinite && nowMs >= t.waitDeadlineMs && (schedRound - t.waitStartRound) >= 1) return true;
+                // Periodic retry for infinite synchronization waits to prevent cooperative deadlock
+                if (t.waitInfinite && (schedRound - t.waitStartRound) >= 50) return true;
+                return false;
             };
 
             const size_t nThreads = threads.size();
@@ -347,7 +350,7 @@ int main(int argc, char* argv[]) {
             frame++;
             auto now = std::chrono::steady_clock::now();
             auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatsTime).count();
-            if (elapsedMs >= 2000) {
+            if (elapsedMs >= 500) {
                 double fps = (frame * 1000.0) / (elapsedMs > 0 ? elapsedMs : 1);
                 size_t activeCount = 0, waitingCount = 0;
                 for (const auto& t : threads) {
@@ -361,6 +364,27 @@ int main(int argc, char* argv[]) {
                    << ") | tid=" << Scarlett::Modules::GetCurrentGuestThreadId()
                    << " RIP=0x" << std::hex << cpu.rip;
                 LOG_INFO("Core", ss.str());
+
+                std::ostringstream ts;
+                auto nowMs = Scarlett::Modules::GetCurrentSyncMs();
+                auto curEpoch = Scarlett::Modules::GetSyncSignalEpoch();
+                auto schedRound = Scarlett::Modules::GetSchedulerRound();
+                auto curIdx = Scarlett::Modules::GetActiveThreadIndex();
+                Scarlett::u64 initSyncHandle = memory.Read<Scarlett::u64>(0x14a210ce8);
+                ts << "Thread States (nowMs=" << nowMs << ", epoch=" << curEpoch << ", round=" << schedRound << ", initSyncHandle=0x" << std::hex << initSyncHandle << std::dec << "):";
+                for (size_t i = 0; i < threads.size(); i++) {
+                    const auto& t = threads[i];
+                    Scarlett::u64 retAddr = (t.ctx.rsp >= Scarlett::GUEST_MEMORY_BASE) ? memory.Read<Scarlett::u64>(t.ctx.rsp) : 0;
+                    ts << "\n  [" << i << "] tid=" << t.threadId << " RIP=0x" << std::hex << (i == curIdx ? cpu.rip : t.ctx.rip)
+                       << " (ret=0x" << retAddr << ")" << std::dec
+                       << (t.waiting ? " [WAITING" : " [RUNNING")
+                       << (t.waitIsSleep ? " Sleep" : "")
+                       << (t.waitInfinite ? " Infinite" : "")
+                       << (t.waitingCondVar ? " CondVar" : "")
+                       << (t.waiting ? (" dl=" + std::to_string(t.waitDeadlineMs)) : "")
+                       << "]";
+                }
+                LOG_INFO("Core", ts.str());
                 frame = 0;
                 lastStatsTime = now;
             }
