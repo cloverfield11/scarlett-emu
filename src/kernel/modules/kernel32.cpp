@@ -430,9 +430,20 @@ static std::string ResolveGuestPath(const std::string& guestPath) {
         return candidate;
     }
 
-    // 2. Direct candidate
+    // 2. Check scarlet-americas directory
+    std::string americas = "scarlet-americas/" + path;
+    if (access(americas.c_str(), F_OK) == 0) {
+        return americas;
+    }
+
+    // 3. Direct candidate
     if (access(path.c_str(), F_OK) == 0) {
         return path;
+    }
+
+    // Default: prioritize scarlet-americas if candidate doesn't exist
+    if (access("scarlet-americas", F_OK) == 0) {
+        return americas;
     }
 
     return candidate;
